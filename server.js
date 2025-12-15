@@ -690,7 +690,7 @@ app.post('/api/ai/chat', authMiddleware, async (req, res) => {
     }
 
     const chat = aiChats[oderId];
-    const result = await chat.sendMessage(message);  // Pass string directly like Python
+    const result = await chat.sendMessage({ parts: [{ text: message }] });  // ContentUnion format with parts
     const response = result.text || '';
 
     res.json({
