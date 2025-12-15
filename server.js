@@ -61,8 +61,8 @@ const AI_SYSTEM_PROMPT = `당신은 '약통'의 AI 어시스턴트입니다. 사
 - 반말/존댓말 사용자 스타일에 맞춤
 - 핵심만 빠르게 전달`;
 
-// Store chat history per session
-const aiChatHistory = {};
+// 세션별 대화 히스토리 저장
+const aiSessions = {}; // { [sessionId]: Content[] }
 
 // Middleware
 app.use(cors());
@@ -667,42 +667,35 @@ app.post('/api/comments/:id/like', authMiddleware, async (req, res) => {
   }
 });
 
-// ==================== AI API ====================
+// ==================== AI API (수정본) ====================
 
 app.post('/api/ai/chat', authMiddleware, async (req, res) => {
   try {
-    const userMessage = String(req.body?.message ?? "").trim();
-    const sessionId = req.body?.sessionId;
-
-    // Validate message
-    if (!userMessage) {
+    const userMessageRaw = String(req.body?.message ?? "").trim();
+    if (!userMessageRaw) {
       return res.status(400).json({ error: "message is required" });
     }
 
-    const oderId = sessionId || `session_${req.user.id}_${Date.now()}`;
+    // 붙여쓴 질문 정규화 (검색 정확도 향상)
+    const userMessage = userMessageRaw.replace(/(정|캡슐|주사|시럽)(성분|효능|용법|금기|상호작용)/g, '$1 $2');
 
-    // Initialize chat history for new sessions
-    if (!aiChatHistory[oderId]) {
-      aiChatHistory[oderId] = [];
+    const sessionId = req.body?.sessionId || `session_${req.user.id}_${Date.now()}`;
+
+    // 세션 초기화
+    if (!aiSessions[sessionId]) {
+      aiSessions[sessionId] = [];
     }
 
-    // Add user message to history
-    aiChatHistory[oderId].push({
-      role: 'user',
+    // user turn 추가
+    aiSessions[sessionId].push({
+      role: "user",
       parts: [{ text: userMessage }]
     });
 
-    // 디버그 로그
-    console.log("=== AI Debug ===");
-    console.log("ABS_STORE:", ABS_STORE);
-    console.log("REL_STORE:", REL_STORE);
-    console.log("userMessage:", userMessage);
-    console.log("History length:", aiChatHistory[oderId].length);
-
-    // Use generateContent with explicit file_search tool
+    // generateContent로 호출 (file_search 확실히 작동)
     const result = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: aiChatHistory[oderId],
+      model: "gemini-2.5-flash",
+      contents: aiSessions[sessionId],
       config: {
         temperature: 0.3,
         systemInstruction: AI_SYSTEM_PROMPT,
@@ -710,36 +703,41 @@ app.post('/api/ai/chat', authMiddleware, async (req, res) => {
           fileSearch: {
             fileSearchStoreNames: [ABS_STORE, REL_STORE]
           }
-        }]
-      }
+        }],
+      },
     });
 
-    // 결과 디버그
-    console.log("AI result candidates:", JSON.stringify(result.candidates?.[0], null, 2));
-    console.log("groundingMetadata:", JSON.stringify(result.candidates?.[0]?.groundingMetadata, null, 2));
+    // 디버그 로그 (확인 후 삭제)
+    console.log("=== AI Debug ===");
+    console.log("userMessage:", userMessage);
+    console.log("Has groundingMetadata?:", !!result?.candidates?.[0]?.groundingMetadata);
+    console.log("Has citationMetadata?:", !!result?.candidates?.[0]?.citationMetadata);
 
-    const response = result.text || '';
+    const candidate = result?.candidates?.[0];
 
-    // Add assistant response to history
-    aiChatHistory[oderId].push({
-      role: 'model',
-      parts: [{ text: response }]
-    });
-
-    // Limit history to last 20 messages to prevent memory issues
-    if (aiChatHistory[oderId].length > 20) {
-      aiChatHistory[oderId] = aiChatHistory[oderId].slice(-20);
+    // model turn을 history에 추가
+    if (candidate?.content) {
+      aiSessions[sessionId].push(candidate.content);
     }
 
+    // 근거 확인 (citations 있는지 체크)
+    const hasCitations =
+      !!candidate?.groundingMetadata ||
+      !!candidate?.citationMetadata ||
+      JSON.stringify(result).toLowerCase().includes("citation");
+
+    const responseText = result.text || candidate?.content?.parts?.[0]?.text || '';
+
     res.json({
-      response: response.trim(),
-      sessionId: oderId
+      response: responseText.trim(),
+      sessionId,
+      hasCitations  // 프론트에서 근거 유무 표시용
     });
+
   } catch (error) {
     console.error('AI Chat Error:', error);
-    console.error('Error details:', error.message, error.stack);
     res.status(500).json({
-      response: '죄송합니다. AI 서비스에 일시적인 문제가 발생했습니다. 잠시 후 다시 시도해주세요.',
+      response: '죄송합니다. AI 서비스에 일시적인 문제가 발생했습니다.',
       error: error.message
     });
   }
