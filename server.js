@@ -2,8 +2,57 @@ const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
+
+// Gemini AI Setup
+const genai = new GoogleGenerativeAI('AIzaSyAiuUG-stKkhynH-RRf06SbHvlh7bkr2eA');
+const ABS_STORE = 'fileSearchStores/mfdsdrugstore1765718067-0689ta6mprlg';
+const REL_STORE = 'fileSearchStores/ymydstore1765791970-4k6wvcc5h5id';
+const AI_SYSTEM_PROMPT = `당신은 '약통'의 AI 어시스턴트입니다. 사용자는 현직 약사이며, 동료 약사에게 자문을 구하듯 대화합니다.
+
+## 지식 소스
+1. **ABS_STORE**: 식약처 허가사항, 성분정보, 용법용량, 금기, 상호작용 등 공식 데이터
+2. **REL_STORE**: 약문약답 임상 사례, 복약지도 노하우, 현장 경험 공유
+
+## 정보 소스 우선순위
+1순위: ABS_STORE - 허가사항/공식 기준
+2순위: REL_STORE - 임상 사례/현장 노하우
+3순위: 일반 약학 지식 - 스토어에 없을 때만
+
+## 응답 원칙
+
+### 1. 전문가 눈높이
+- 성분명(일반명) 중심으로 답변
+- 약리기전, DDI, PK/PD 등 전문 용어 그대로 사용
+- 불필요한 기초 설명 생략
+
+### 2. 정보 검색
+- 모든 질문에 두 스토어 우선 검색
+- 허가사항/금기/용량 → ABS_STORE 우선
+- 실제 투약 경험/대체약 추천 → REL_STORE 참고
+- 상충 시 ABS_STORE 우선, 단 REL_STORE의 임상 관점도 병기
+
+### 3. 응답 형식
+[답변]
+(간결하고 핵심 중심)
+
+[근거]
+- 공식: {파일명}
+- 임상: {파일명}
+- 또는 [일반 약학 지식]
+
+### 4. 정보 부재 시
+- "해당 내용은 DB에서 확인되지 않습니다"
+- 추측 금지, 있는 정보만 제공
+
+### 5. 톤
+- 동료 약사 간 대화처럼 간결하고 실무적
+- 반말/존댓말 사용자 스타일에 맞춤
+- 핵심만 빠르게 전달`;
+
+const aiChats = {};
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'yaktong-secret-key-2024';
 
@@ -355,13 +404,40 @@ app.post('/api/comments/:id/like', authMiddleware, (req, res) => {
 
 // ==================== AI API ====================
 
-app.post('/api/ai/chat', authMiddleware, (req, res) => {
-  const { message } = req.body;
-  // Simple mock response
-  res.json({
-    response: `안녕하세요! "${message}"에 대한 답변입니다. 약사로서 도움이 필요하시면 말씀해주세요.`,
-    sessionId: 'mock-session-id'
-  });
+app.post('/api/ai/chat', authMiddleware, async (req, res) => {
+  try {
+    const { message, sessionId } = req.body;
+    const oderId = sessionId || `session_${req.user.id}_${Date.now()}`;
+
+    // Get or create chat session
+    if (!aiChats[oderId]) {
+      const model = genai.getGenerativeModel({
+        model: 'gemini-2.0-flash',
+        systemInstruction: AI_SYSTEM_PROMPT,
+      });
+      aiChats[oderId] = model.startChat({
+        history: [],
+        generationConfig: {
+          temperature: 0.3,
+        },
+      });
+    }
+
+    const chat = aiChats[oderId];
+    const result = await chat.sendMessage(message);
+    const response = result.response.text();
+
+    res.json({
+      response: response,
+      sessionId: oderId
+    });
+  } catch (error) {
+    console.error('AI Chat Error:', error);
+    res.status(500).json({
+      response: '죄송합니다. AI 서비스에 일시적인 문제가 발생했습니다. 잠시 후 다시 시도해주세요.',
+      error: error.message
+    });
+  }
 });
 
 // ==================== Notice API ====================
