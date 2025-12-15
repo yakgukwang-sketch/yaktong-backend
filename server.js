@@ -701,7 +701,7 @@ app.post('/api/ai/chat', authMiddleware, async (req, res) => {
         systemInstruction: AI_SYSTEM_PROMPT,
         tools: [{
           fileSearch: {
-            fileSearchStoreNames: [ABS_STORE]  // ABS_STORE만 테스트
+            fileSearchStoreNames: [ABS_STORE, REL_STORE]
           }
         }],
       },
