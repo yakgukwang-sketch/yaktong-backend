@@ -673,9 +673,9 @@ app.post('/api/ai/chat', authMiddleware, async (req, res) => {
     const { message, sessionId } = req.body;
     const oderId = sessionId || `session_${req.user.id}_${Date.now()}`;
 
-    // Get or create chat session
+    // Get or create chat session (matching Python SDK structure)
     if (!aiChats[oderId]) {
-      aiChats[oderId] = ai.chats.create({
+      aiChats[oderId] = await ai.chats.create({
         model: 'gemini-2.5-flash',
         config: {
           temperature: 0.3,
@@ -689,8 +689,8 @@ app.post('/api/ai/chat', authMiddleware, async (req, res) => {
       });
     }
 
-    const chat = await aiChats[oderId];
-    const result = await chat.sendMessage({ message });
+    const chat = aiChats[oderId];
+    const result = await chat.sendMessage(message);  // Pass string directly like Python
     const response = result.text || '';
 
     res.json({
