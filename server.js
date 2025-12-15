@@ -670,7 +670,14 @@ app.post('/api/comments/:id/like', authMiddleware, async (req, res) => {
 
 app.post('/api/ai/chat', authMiddleware, async (req, res) => {
   try {
-    const { message, sessionId } = req.body;
+    const userMessage = String(req.body?.message ?? "").trim();
+    const sessionId = req.body?.sessionId;
+
+    // Validate message
+    if (!userMessage) {
+      return res.status(400).json({ error: "message is required" });
+    }
+
     const oderId = sessionId || `session_${req.user.id}_${Date.now()}`;
 
     // Get or create chat session (matching Python SDK structure)
@@ -690,7 +697,7 @@ app.post('/api/ai/chat', authMiddleware, async (req, res) => {
     }
 
     const chat = aiChats[oderId];
-    const result = await chat.sendMessage({ parts: [{ text: message }] });  // ContentUnion format with parts
+    const result = await chat.sendMessage({ message: userMessage });  // Correct format per SDK docs
     const response = result.text || '';
 
     res.json({
