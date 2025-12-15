@@ -697,7 +697,7 @@ app.post('/api/ai/chat', authMiddleware, async (req, res) => {
     }
 
     const chat = aiChats[oderId];
-    const result = await chat.sendMessage({ message: userMessage });  // Correct format per SDK docs
+    const result = await chat.sendMessage(userMessage);  // 문자열 직접 전달
     const response = result.text || '';
 
     res.json({
