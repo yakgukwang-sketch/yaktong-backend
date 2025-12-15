@@ -697,7 +697,19 @@ app.post('/api/ai/chat', authMiddleware, async (req, res) => {
     }
 
     const chat = aiChats[oderId];
-    const result = await chat.sendMessage({ message: userMessage });  // 객체 형식
+
+    // 디버그 로그
+    console.log("=== AI Debug ===");
+    console.log("ABS_STORE:", ABS_STORE);
+    console.log("REL_STORE:", REL_STORE);
+    console.log("AI_SYSTEM_PROMPT length:", (AI_SYSTEM_PROMPT || "").length);
+    console.log("userMessage:", userMessage);
+
+    const result = await chat.sendMessage({ message: userMessage });
+
+    // 결과 디버그
+    console.log("AI raw result:", JSON.stringify(result, null, 2));
+
     const response = result.text || '';
 
     res.json({
