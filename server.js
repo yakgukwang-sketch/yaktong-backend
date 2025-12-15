@@ -61,7 +61,8 @@ const AI_SYSTEM_PROMPT = `당신은 '약통'의 AI 어시스턴트입니다. 사
 - 반말/존댓말 사용자 스타일에 맞춤
 - 핵심만 빠르게 전달`;
 
-const aiChats = {};
+// Store chat history per session
+const aiChatHistory = {};
 
 // Middleware
 app.use(cors());
@@ -680,37 +681,55 @@ app.post('/api/ai/chat', authMiddleware, async (req, res) => {
 
     const oderId = sessionId || `session_${req.user.id}_${Date.now()}`;
 
-    // Get or create chat session (matching Python SDK structure)
-    if (!aiChats[oderId]) {
-      aiChats[oderId] = await ai.chats.create({
-        model: 'gemini-2.5-flash',
-        config: {
-          temperature: 0.3,
-          systemInstruction: AI_SYSTEM_PROMPT,
-          tools: [{
-            fileSearch: {
-              fileSearchStoreNames: [ABS_STORE, REL_STORE]
-            }
-          }]
-        }
-      });
+    // Initialize chat history for new sessions
+    if (!aiChatHistory[oderId]) {
+      aiChatHistory[oderId] = [];
     }
 
-    const chat = aiChats[oderId];
+    // Add user message to history
+    aiChatHistory[oderId].push({
+      role: 'user',
+      parts: [{ text: userMessage }]
+    });
 
     // 디버그 로그
     console.log("=== AI Debug ===");
     console.log("ABS_STORE:", ABS_STORE);
     console.log("REL_STORE:", REL_STORE);
-    console.log("AI_SYSTEM_PROMPT length:", (AI_SYSTEM_PROMPT || "").length);
     console.log("userMessage:", userMessage);
+    console.log("History length:", aiChatHistory[oderId].length);
 
-    const result = await chat.sendMessage({ message: userMessage });
+    // Use generateContent with explicit file_search tool
+    const result = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: aiChatHistory[oderId],
+      config: {
+        temperature: 0.3,
+        systemInstruction: AI_SYSTEM_PROMPT,
+        tools: [{
+          fileSearch: {
+            fileSearchStoreNames: [ABS_STORE, REL_STORE]
+          }
+        }]
+      }
+    });
 
     // 결과 디버그
-    console.log("AI raw result:", JSON.stringify(result, null, 2));
+    console.log("AI result candidates:", JSON.stringify(result.candidates?.[0], null, 2));
+    console.log("groundingMetadata:", JSON.stringify(result.candidates?.[0]?.groundingMetadata, null, 2));
 
     const response = result.text || '';
+
+    // Add assistant response to history
+    aiChatHistory[oderId].push({
+      role: 'model',
+      parts: [{ text: response }]
+    });
+
+    // Limit history to last 20 messages to prevent memory issues
+    if (aiChatHistory[oderId].length > 20) {
+      aiChatHistory[oderId] = aiChatHistory[oderId].slice(-20);
+    }
 
     res.json({
       response: response.trim(),
@@ -718,6 +737,7 @@ app.post('/api/ai/chat', authMiddleware, async (req, res) => {
     });
   } catch (error) {
     console.error('AI Chat Error:', error);
+    console.error('Error details:', error.message, error.stack);
     res.status(500).json({
       response: '죄송합니다. AI 서비스에 일시적인 문제가 발생했습니다. 잠시 후 다시 시도해주세요.',
       error: error.message
