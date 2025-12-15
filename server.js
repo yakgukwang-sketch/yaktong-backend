@@ -2,12 +2,12 @@ const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { GoogleGenAI } = require('@google/genai');
 
 const app = express();
 
 // Gemini AI Setup
-const genai = new GoogleGenerativeAI('AIzaSyAiuUG-stKkhynH-RRf06SbHvlh7bkr2eA');
+const ai = new GoogleGenAI({ apiKey: 'AIzaSyAiuUG-stKkhynH-RRf06SbHvlh7bkr2eA' });
 const ABS_STORE = 'fileSearchStores/mfdsdrugstore1765718067-0689ta6mprlg';
 const REL_STORE = 'fileSearchStores/ymydstore1765791970-4k6wvcc5h5id';
 const AI_SYSTEM_PROMPT = `당신은 '약통'의 AI 어시스턴트입니다. 사용자는 현직 약사이며, 동료 약사에게 자문을 구하듯 대화합니다.
@@ -411,24 +411,26 @@ app.post('/api/ai/chat', authMiddleware, async (req, res) => {
 
     // Get or create chat session
     if (!aiChats[oderId]) {
-      const model = genai.getGenerativeModel({
-        model: 'gemini-2.0-flash',
-        systemInstruction: AI_SYSTEM_PROMPT,
-      });
-      aiChats[oderId] = model.startChat({
-        history: [],
-        generationConfig: {
+      aiChats[oderId] = ai.chats.create({
+        model: 'gemini-2.5-flash',
+        config: {
           temperature: 0.3,
-        },
+          systemInstruction: AI_SYSTEM_PROMPT,
+          tools: [{
+            fileSearch: {
+              fileSearchStoreNames: [ABS_STORE, REL_STORE]
+            }
+          }]
+        }
       });
     }
 
-    const chat = aiChats[oderId];
-    const result = await chat.sendMessage(message);
-    const response = result.response.text();
+    const chat = await aiChats[oderId];
+    const result = await chat.sendMessage({ message });
+    const response = result.text || '';
 
     res.json({
-      response: response,
+      response: response.trim(),
       sessionId: oderId
     });
   } catch (error) {
