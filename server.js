@@ -79,9 +79,15 @@ async function initDB() {
         password VARCHAR(255) NOT NULL,
         name VARCHAR(100) NOT NULL,
         phone VARCHAR(20),
+        profile_image TEXT,
         is_admin BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
+    `);
+
+    // Add profile_image column if not exists (for existing DB)
+    await pool.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image TEXT
     `);
 
     await pool.query(`
@@ -213,6 +219,7 @@ app.post('/api/auth/register', async (req, res) => {
         email: user.email,
         name: user.name,
         phone: user.phone,
+        profileImage: user.profile_image,
         isAdmin: user.is_admin,
         createdAt: user.created_at
       }
@@ -247,6 +254,7 @@ app.post('/api/auth/login', async (req, res) => {
         email: user.email,
         name: user.name,
         phone: user.phone,
+        profileImage: user.profile_image,
         isAdmin: user.is_admin,
         createdAt: user.created_at
       }
@@ -290,6 +298,16 @@ app.post('/api/auth/phone', authMiddleware, async (req, res) => {
     const { phone } = req.body;
     await pool.query('UPDATE users SET phone = $1 WHERE id = $2', [phone, req.user.id]);
     res.json({ message: '전화번호가 변경되었습니다.' });
+  } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+app.post('/api/auth/profile-image', authMiddleware, async (req, res) => {
+  try {
+    const { profileImage } = req.body;
+    await pool.query('UPDATE users SET profile_image = $1 WHERE id = $2', [profileImage, req.user.id]);
+    res.json({ message: '프로필 이미지가 변경되었습니다.', profileImage });
   } catch (error) {
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
