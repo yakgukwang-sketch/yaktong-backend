@@ -113,12 +113,18 @@ async function initDB() {
       CREATE TABLE IF NOT EXISTS comments (
         id SERIAL PRIMARY KEY,
         post_id INTEGER REFERENCES posts(id) ON DELETE CASCADE,
+        parent_id INTEGER REFERENCES comments(id) ON DELETE CASCADE,
         content TEXT NOT NULL,
         author_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
         author_name VARCHAR(100),
         like_count INTEGER DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
+    `);
+
+    // Add parent_id column if not exists (for existing DB)
+    await pool.query(`
+      ALTER TABLE comments ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES comments(id) ON DELETE CASCADE
     `);
 
     await pool.query(`
@@ -577,7 +583,8 @@ app.get('/api/posts/:postId/comments', authMiddleware, async (req, res) => {
       [postId]
     );
 
-    const comments = await Promise.all(result.rows.map(async (c) => {
+    // Get like status for all comments
+    const commentsWithLikes = await Promise.all(result.rows.map(async (c) => {
       const likeResult = await pool.query(
         'SELECT id FROM comment_likes WHERE comment_id = $1 AND user_id = $2',
         [c.id, req.user.id]
@@ -585,16 +592,34 @@ app.get('/api/posts/:postId/comments', authMiddleware, async (req, res) => {
       return {
         id: c.id,
         postId: c.post_id,
+        parentId: c.parent_id,
         content: c.content,
         authorId: c.author_id,
         authorName: c.author_name,
         likeCount: c.like_count,
         createdAt: c.created_at,
-        isLiked: likeResult.rows.length > 0
+        isLiked: likeResult.rows.length > 0,
+        replies: []
       };
     }));
 
-    res.json(comments);
+    // Build nested structure: parent comments with replies
+    const commentMap = {};
+    const rootComments = [];
+
+    commentsWithLikes.forEach(c => {
+      commentMap[c.id] = c;
+    });
+
+    commentsWithLikes.forEach(c => {
+      if (c.parentId && commentMap[c.parentId]) {
+        commentMap[c.parentId].replies.push(c);
+      } else if (!c.parentId) {
+        rootComments.push(c);
+      }
+    });
+
+    res.json(rootComments);
   } catch (error) {
     console.error('Get comments error:', error);
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
@@ -604,11 +629,11 @@ app.get('/api/posts/:postId/comments', authMiddleware, async (req, res) => {
 app.post('/api/posts/:postId/comments', authMiddleware, async (req, res) => {
   try {
     const postId = parseInt(req.params.postId);
-    const { content } = req.body;
+    const { content, parentId } = req.body;
 
     const result = await pool.query(
-      'INSERT INTO comments (post_id, content, author_id, author_name) VALUES ($1, $2, $3, $4) RETURNING *',
-      [postId, content, req.user.id, req.user.name]
+      'INSERT INTO comments (post_id, parent_id, content, author_id, author_name) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [postId, parentId || null, content, req.user.id, req.user.name]
     );
 
     await pool.query('UPDATE posts SET comment_count = comment_count + 1 WHERE id = $1', [postId]);
@@ -617,11 +642,13 @@ app.post('/api/posts/:postId/comments', authMiddleware, async (req, res) => {
     res.json({
       id: c.id,
       postId: c.post_id,
+      parentId: c.parent_id,
       content: c.content,
       authorId: c.author_id,
       authorName: c.author_name,
       likeCount: c.like_count,
-      createdAt: c.created_at
+      createdAt: c.created_at,
+      replies: []
     });
   } catch (error) {
     console.error('Create comment error:', error);
