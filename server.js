@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
@@ -16,9 +17,9 @@ const pool = new Pool({
 });
 
 // Gemini AI Setup
-const ai = new GoogleGenAI({ apiKey: 'AIzaSyAiuUG-stKkhynH-RRf06SbHvlh7bkr2eA' });
-const ABS_STORE = 'fileSearchStores/mfdsdrugstore1765718067-0689ta6mprlg';
-const REL_STORE = 'fileSearchStores/ymydstore1765791970-4k6wvcc5h5id';
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const ABS_STORE = 'fileSearchStores/mfdsdrugstore1765819248-f2vhzseniw9t';
+const REL_STORE = 'fileSearchStores/ymydstore1765817115-9jn4gkjo6hbb';
 const AI_SYSTEM_PROMPT = `당신은 '약통'의 AI 어시스턴트입니다. 사용자는 현직 약사이며, 동료 약사에게 자문을 구하듯 대화합니다.
 
 ## 지식 소스
