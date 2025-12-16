@@ -362,109 +362,7 @@ app.get('/api/posts', authMiddleware, async (req, res) => {
   }
 });
 
-app.get('/api/posts/:id', authMiddleware, async (req, res) => {
-  try {
-    const postId = parseInt(req.params.id);
-
-    await pool.query('UPDATE posts SET view_count = view_count + 1 WHERE id = $1', [postId]);
-
-    const result = await pool.query('SELECT * FROM posts WHERE id = $1', [postId]);
-    if (result.rows.length === 0) {
-      return res.status(404).json({ message: '게시글을 찾을 수 없습니다.' });
-    }
-
-    const likeResult = await pool.query(
-      'SELECT id FROM post_likes WHERE post_id = $1 AND user_id = $2',
-      [postId, req.user.id]
-    );
-
-    const p = result.rows[0];
-    res.json({
-      id: p.id,
-      title: p.title,
-      content: p.content,
-      category: p.category,
-      isAnonymous: p.is_anonymous,
-      authorId: p.author_id,
-      authorName: p.author_name,
-      likeCount: p.like_count,
-      commentCount: p.comment_count,
-      viewCount: p.view_count,
-      createdAt: p.created_at,
-      isLiked: likeResult.rows.length > 0
-    });
-  } catch (error) {
-    console.error('Get post error:', error);
-    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
-  }
-});
-
-app.post('/api/posts', authMiddleware, async (req, res) => {
-  try {
-    const { title, content, category, isAnonymous } = req.body;
-    const authorName = isAnonymous ? '익명' : req.user.name;
-
-    const result = await pool.query(
-      'INSERT INTO posts (title, content, category, is_anonymous, author_id, author_name) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [title, content, category || 'daily', isAnonymous || false, req.user.id, authorName]
-    );
-
-    const p = result.rows[0];
-    res.json({
-      id: p.id,
-      title: p.title,
-      content: p.content,
-      category: p.category,
-      isAnonymous: p.is_anonymous,
-      authorId: p.author_id,
-      authorName: p.author_name,
-      likeCount: p.like_count,
-      commentCount: p.comment_count,
-      viewCount: p.view_count,
-      createdAt: p.created_at
-    });
-  } catch (error) {
-    console.error('Create post error:', error);
-    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
-  }
-});
-
-app.delete('/api/posts/:id', authMiddleware, async (req, res) => {
-  try {
-    const postId = parseInt(req.params.id);
-    await pool.query('DELETE FROM posts WHERE id = $1 AND author_id = $2', [postId, req.user.id]);
-    res.json({ message: '게시글이 삭제되었습니다.' });
-  } catch (error) {
-    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
-  }
-});
-
-app.post('/api/posts/:id/like', authMiddleware, async (req, res) => {
-  try {
-    const postId = parseInt(req.params.id);
-
-    const existingLike = await pool.query(
-      'SELECT id FROM post_likes WHERE post_id = $1 AND user_id = $2',
-      [postId, req.user.id]
-    );
-
-    if (existingLike.rows.length > 0) {
-      await pool.query('DELETE FROM post_likes WHERE post_id = $1 AND user_id = $2', [postId, req.user.id]);
-      await pool.query('UPDATE posts SET like_count = like_count - 1 WHERE id = $1', [postId]);
-      const result = await pool.query('SELECT like_count FROM posts WHERE id = $1', [postId]);
-      res.json({ liked: false, likeCount: result.rows[0].like_count });
-    } else {
-      await pool.query('INSERT INTO post_likes (post_id, user_id) VALUES ($1, $2)', [postId, req.user.id]);
-      await pool.query('UPDATE posts SET like_count = like_count + 1 WHERE id = $1', [postId]);
-      const result = await pool.query('SELECT like_count FROM posts WHERE id = $1', [postId]);
-      res.json({ liked: true, likeCount: result.rows[0].like_count });
-    }
-  } catch (error) {
-    console.error('Like post error:', error);
-    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
-  }
-});
-
+// Static routes must come before parameterized routes
 app.get('/api/posts/search', authMiddleware, async (req, res) => {
   try {
     const { q } = req.query;
@@ -569,6 +467,110 @@ app.get('/api/posts/my/likes', authMiddleware, async (req, res) => {
 
     res.json(posts);
   } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// Parameterized routes come after static routes
+app.get('/api/posts/:id', authMiddleware, async (req, res) => {
+  try {
+    const postId = parseInt(req.params.id);
+
+    await pool.query('UPDATE posts SET view_count = view_count + 1 WHERE id = $1', [postId]);
+
+    const result = await pool.query('SELECT * FROM posts WHERE id = $1', [postId]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: '게시글을 찾을 수 없습니다.' });
+    }
+
+    const likeResult = await pool.query(
+      'SELECT id FROM post_likes WHERE post_id = $1 AND user_id = $2',
+      [postId, req.user.id]
+    );
+
+    const p = result.rows[0];
+    res.json({
+      id: p.id,
+      title: p.title,
+      content: p.content,
+      category: p.category,
+      isAnonymous: p.is_anonymous,
+      authorId: p.author_id,
+      authorName: p.author_name,
+      likeCount: p.like_count,
+      commentCount: p.comment_count,
+      viewCount: p.view_count,
+      createdAt: p.created_at,
+      isLiked: likeResult.rows.length > 0
+    });
+  } catch (error) {
+    console.error('Get post error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+app.post('/api/posts', authMiddleware, async (req, res) => {
+  try {
+    const { title, content, category, isAnonymous } = req.body;
+    const authorName = isAnonymous ? '익명' : req.user.name;
+
+    const result = await pool.query(
+      'INSERT INTO posts (title, content, category, is_anonymous, author_id, author_name) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [title, content, category || 'daily', isAnonymous || false, req.user.id, authorName]
+    );
+
+    const p = result.rows[0];
+    res.json({
+      id: p.id,
+      title: p.title,
+      content: p.content,
+      category: p.category,
+      isAnonymous: p.is_anonymous,
+      authorId: p.author_id,
+      authorName: p.author_name,
+      likeCount: p.like_count,
+      commentCount: p.comment_count,
+      viewCount: p.view_count,
+      createdAt: p.created_at
+    });
+  } catch (error) {
+    console.error('Create post error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+app.delete('/api/posts/:id', authMiddleware, async (req, res) => {
+  try {
+    const postId = parseInt(req.params.id);
+    await pool.query('DELETE FROM posts WHERE id = $1 AND author_id = $2', [postId, req.user.id]);
+    res.json({ message: '게시글이 삭제되었습니다.' });
+  } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+app.post('/api/posts/:id/like', authMiddleware, async (req, res) => {
+  try {
+    const postId = parseInt(req.params.id);
+
+    const existingLike = await pool.query(
+      'SELECT id FROM post_likes WHERE post_id = $1 AND user_id = $2',
+      [postId, req.user.id]
+    );
+
+    if (existingLike.rows.length > 0) {
+      await pool.query('DELETE FROM post_likes WHERE post_id = $1 AND user_id = $2', [postId, req.user.id]);
+      await pool.query('UPDATE posts SET like_count = like_count - 1 WHERE id = $1', [postId]);
+      const result = await pool.query('SELECT like_count FROM posts WHERE id = $1', [postId]);
+      res.json({ liked: false, likeCount: result.rows[0].like_count });
+    } else {
+      await pool.query('INSERT INTO post_likes (post_id, user_id) VALUES ($1, $2)', [postId, req.user.id]);
+      await pool.query('UPDATE posts SET like_count = like_count + 1 WHERE id = $1', [postId]);
+      const result = await pool.query('SELECT like_count FROM posts WHERE id = $1', [postId]);
+      res.json({ liked: true, likeCount: result.rows[0].like_count });
+    }
+  } catch (error) {
+    console.error('Like post error:', error);
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
 });
