@@ -843,17 +843,6 @@ app.get('/api/admin/users', authMiddleware, async (req, res) => {
   }
 });
 
-// 임시: 관리자 지정 (배포 후 삭제할 것)
-app.get('/api/temp/make-admin', async (req, res) => {
-  try {
-    const email = '123456@naver.com';
-    await pool.query('UPDATE users SET is_admin = true WHERE email = $1', [email]);
-    res.json({ message: `${email} 관리자 지정 완료` });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // Health check
 app.get('/', (req, res) => {
   res.json({ message: 'Yaktong API Server', status: 'running' });
