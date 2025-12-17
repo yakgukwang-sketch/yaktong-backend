@@ -350,16 +350,17 @@ app.get('/api/posts', authMiddleware, async (req, res) => {
   try {
     const { category, page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
+    const isAdmin = req.user.is_admin;
 
-    let query = 'SELECT * FROM posts';
+    let query = 'SELECT p.*, u.name as real_author_name FROM posts p LEFT JOIN users u ON p.author_id = u.id';
     let params = [];
 
     if (category && category !== 'all') {
-      query += ' WHERE category = $1';
+      query += ' WHERE p.category = $1';
       params.push(category);
     }
 
-    query += ' ORDER BY created_at DESC LIMIT $' + (params.length + 1) + ' OFFSET $' + (params.length + 2);
+    query += ' ORDER BY p.created_at DESC LIMIT $' + (params.length + 1) + ' OFFSET $' + (params.length + 2);
     params.push(limit, offset);
 
     const result = await pool.query(query, params);
@@ -372,6 +373,7 @@ app.get('/api/posts', authMiddleware, async (req, res) => {
       isAnonymous: p.is_anonymous,
       authorId: p.author_id,
       authorName: p.author_name,
+      realAuthorName: isAdmin && p.is_anonymous ? p.real_author_name : null,
       likeCount: p.like_count,
       commentCount: p.comment_count,
       viewCount: p.view_count,
@@ -498,10 +500,14 @@ app.get('/api/posts/my/likes', authMiddleware, async (req, res) => {
 app.get('/api/posts/:id', authMiddleware, async (req, res) => {
   try {
     const postId = parseInt(req.params.id);
+    const isAdmin = req.user.is_admin;
 
     await pool.query('UPDATE posts SET view_count = view_count + 1 WHERE id = $1', [postId]);
 
-    const result = await pool.query('SELECT * FROM posts WHERE id = $1', [postId]);
+    const result = await pool.query(
+      'SELECT p.*, u.name as real_author_name FROM posts p LEFT JOIN users u ON p.author_id = u.id WHERE p.id = $1',
+      [postId]
+    );
     if (result.rows.length === 0) {
       return res.status(404).json({ message: '게시글을 찾을 수 없습니다.' });
     }
@@ -520,6 +526,7 @@ app.get('/api/posts/:id', authMiddleware, async (req, res) => {
       isAnonymous: p.is_anonymous,
       authorId: p.author_id,
       authorName: p.author_name,
+      realAuthorName: isAdmin && p.is_anonymous ? p.real_author_name : null,
       likeCount: p.like_count,
       commentCount: p.comment_count,
       viewCount: p.view_count,
@@ -603,8 +610,14 @@ app.post('/api/posts/:id/like', authMiddleware, async (req, res) => {
 app.get('/api/posts/:postId/comments', authMiddleware, async (req, res) => {
   try {
     const postId = parseInt(req.params.postId);
+    const isAdmin = req.user.is_admin;
+
+    // 게시글이 익명 게시판인지 확인
+    const postResult = await pool.query('SELECT category FROM posts WHERE id = $1', [postId]);
+    const isAnonymousBoard = postResult.rows[0]?.category === 'anonymous';
+
     const result = await pool.query(
-      'SELECT * FROM comments WHERE post_id = $1 ORDER BY created_at ASC',
+      'SELECT c.*, u.name as real_author_name FROM comments c LEFT JOIN users u ON c.author_id = u.id WHERE c.post_id = $1 ORDER BY c.created_at ASC',
       [postId]
     );
 
@@ -621,6 +634,7 @@ app.get('/api/posts/:postId/comments', authMiddleware, async (req, res) => {
         content: c.content,
         authorId: c.author_id,
         authorName: c.author_name,
+        realAuthorName: isAdmin && isAnonymousBoard ? c.real_author_name : null,
         likeCount: c.like_count,
         createdAt: c.created_at,
         isLiked: likeResult.rows.length > 0,
