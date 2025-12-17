@@ -90,6 +90,11 @@ async function initDB() {
       ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image TEXT
     `);
 
+    // Add is_blocked column if not exists (for existing DB)
+    await pool.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE
+    `);
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS posts (
         id SERIAL PRIMARY KEY,
@@ -827,17 +832,67 @@ app.get('/api/admin/users', authMiddleware, async (req, res) => {
       return res.status(403).json({ message: '권한이 없습니다.' });
     }
 
-    const result = await pool.query('SELECT id, email, name, phone, is_admin, created_at FROM users');
+    const result = await pool.query('SELECT id, email, name, phone, is_admin, is_blocked, created_at FROM users ORDER BY created_at DESC');
     const users = result.rows.map(u => ({
       id: u.id,
       email: u.email,
       name: u.name,
       phone: u.phone,
       isAdmin: u.is_admin,
+      isBlocked: u.is_blocked || false,
       createdAt: u.created_at
     }));
 
     res.json(users);
+  } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 회원 차단/해제
+app.post('/api/admin/users/:id/block', authMiddleware, async (req, res) => {
+  try {
+    if (!req.user.is_admin) {
+      return res.status(403).json({ message: '권한이 없습니다.' });
+    }
+
+    const userId = parseInt(req.params.id);
+    const { blocked } = req.body;
+
+    await pool.query('UPDATE users SET is_blocked = $1 WHERE id = $2', [blocked, userId]);
+    res.json({ message: blocked ? '회원이 차단되었습니다.' : '차단이 해제되었습니다.' });
+  } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 회원 삭제
+app.delete('/api/admin/users/:id', authMiddleware, async (req, res) => {
+  try {
+    if (!req.user.is_admin) {
+      return res.status(403).json({ message: '권한이 없습니다.' });
+    }
+
+    const userId = parseInt(req.params.id);
+    await pool.query('DELETE FROM users WHERE id = $1', [userId]);
+    res.json({ message: '회원이 삭제되었습니다.' });
+  } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 관리자 권한 부여/해제
+app.post('/api/admin/users/:id/admin', authMiddleware, async (req, res) => {
+  try {
+    if (!req.user.is_admin) {
+      return res.status(403).json({ message: '권한이 없습니다.' });
+    }
+
+    const userId = parseInt(req.params.id);
+    const { isAdmin } = req.body;
+
+    await pool.query('UPDATE users SET is_admin = $1 WHERE id = $2', [isAdmin, userId]);
+    res.json({ message: isAdmin ? '관리자로 지정되었습니다.' : '관리자 권한이 해제되었습니다.' });
   } catch (error) {
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
