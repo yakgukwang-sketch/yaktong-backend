@@ -651,9 +651,14 @@ app.post('/api/posts/:postId/comments', authMiddleware, async (req, res) => {
     const postId = parseInt(req.params.postId);
     const { content, parentId } = req.body;
 
+    // 익명 게시판인지 확인
+    const postResult = await pool.query('SELECT category FROM posts WHERE id = $1', [postId]);
+    const isAnonymousBoard = postResult.rows[0]?.category === 'anonymous';
+    const authorName = isAnonymousBoard ? '익명' : req.user.name;
+
     const result = await pool.query(
       'INSERT INTO comments (post_id, parent_id, content, author_id, author_name) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [postId, parentId || null, content, req.user.id, req.user.name]
+      [postId, parentId || null, content, req.user.id, authorName]
     );
 
     await pool.query('UPDATE posts SET comment_count = comment_count + 1 WHERE id = $1', [postId]);
@@ -835,6 +840,17 @@ app.get('/api/admin/users', authMiddleware, async (req, res) => {
     res.json(users);
   } catch (error) {
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 임시: 관리자 지정 (배포 후 삭제할 것)
+app.get('/api/temp/make-admin', async (req, res) => {
+  try {
+    const email = '123456@naver.com';
+    await pool.query('UPDATE users SET is_admin = true WHERE email = $1', [email]);
+    res.json({ message: `${email} 관리자 지정 완료` });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
