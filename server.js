@@ -156,6 +156,34 @@ async function initDB() {
       )
     `);
 
+    // Add author_id and is_pinned columns if not exists
+    await pool.query(`
+      ALTER TABLE notices ADD COLUMN IF NOT EXISTS author_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+    `);
+    await pool.query(`
+      ALTER TABLE notices ADD COLUMN IF NOT EXISTS author_name VARCHAR(100) DEFAULT '관리자'
+    `);
+    await pool.query(`
+      ALTER TABLE notices ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN DEFAULT FALSE
+    `);
+
+    // Notifications table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS notifications (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        type VARCHAR(50) NOT NULL,
+        title VARCHAR(255) NOT NULL,
+        message TEXT,
+        post_id INTEGER REFERENCES posts(id) ON DELETE CASCADE,
+        comment_id INTEGER REFERENCES comments(id) ON DELETE CASCADE,
+        from_user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        from_user_name VARCHAR(100),
+        is_read BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     // Insert default notice if none exists
     const noticeCheck = await pool.query('SELECT COUNT(*) FROM notices');
     if (parseInt(noticeCheck.rows[0].count) === 0) {
@@ -596,7 +624,18 @@ app.post('/api/posts/:id/like', authMiddleware, async (req, res) => {
     } else {
       await pool.query('INSERT INTO post_likes (post_id, user_id) VALUES ($1, $2)', [postId, req.user.id]);
       await pool.query('UPDATE posts SET like_count = like_count + 1 WHERE id = $1', [postId]);
-      const result = await pool.query('SELECT like_count FROM posts WHERE id = $1', [postId]);
+      const result = await pool.query('SELECT like_count, author_id, title FROM posts WHERE id = $1', [postId]);
+
+      // 알림 생성 (자신의 글에 좋아요한 경우 제외)
+      const postAuthorId = result.rows[0].author_id;
+      if (postAuthorId && postAuthorId !== req.user.id) {
+        await pool.query(
+          `INSERT INTO notifications (user_id, type, title, message, post_id, from_user_id, from_user_name)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [postAuthorId, 'like', '새 좋아요', `${req.user.name}님이 "${result.rows[0].title}" 글을 좋아합니다.`, postId, req.user.id, req.user.name]
+        );
+      }
+
       res.json({ liked: true, likeCount: result.rows[0].like_count });
     }
   } catch (error) {
@@ -670,9 +709,10 @@ app.post('/api/posts/:postId/comments', authMiddleware, async (req, res) => {
     const postId = parseInt(req.params.postId);
     const { content, parentId } = req.body;
 
-    // 익명 게시판인지 확인
-    const postResult = await pool.query('SELECT category FROM posts WHERE id = $1', [postId]);
-    const isAnonymousBoard = postResult.rows[0]?.category === 'anonymous';
+    // 게시글 정보 조회
+    const postResult = await pool.query('SELECT author_id, title, category FROM posts WHERE id = $1', [postId]);
+    const post = postResult.rows[0];
+    const isAnonymousBoard = post?.category === 'anonymous';
     const authorName = isAnonymousBoard ? '익명' : req.user.name;
 
     const result = await pool.query(
@@ -683,6 +723,30 @@ app.post('/api/posts/:postId/comments', authMiddleware, async (req, res) => {
     await pool.query('UPDATE posts SET comment_count = comment_count + 1 WHERE id = $1', [postId]);
 
     const c = result.rows[0];
+
+    // 알림 생성 (자신의 글에 자신이 댓글 단 경우 제외)
+    if (parentId) {
+      // 대댓글인 경우 - 원댓글 작성자에게 알림
+      const parentComment = await pool.query('SELECT author_id FROM comments WHERE id = $1', [parentId]);
+      const parentAuthorId = parentComment.rows[0]?.author_id;
+      if (parentAuthorId && parentAuthorId !== req.user.id) {
+        await pool.query(
+          `INSERT INTO notifications (user_id, type, title, message, post_id, comment_id, from_user_id, from_user_name)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [parentAuthorId, 'reply', '새 답글', `${authorName}님이 회원님의 댓글에 답글을 남겼습니다.`, postId, c.id, req.user.id, authorName]
+        );
+      }
+    } else {
+      // 일반 댓글인 경우 - 게시글 작성자에게 알림
+      if (post.author_id && post.author_id !== req.user.id) {
+        await pool.query(
+          `INSERT INTO notifications (user_id, type, title, message, post_id, comment_id, from_user_id, from_user_name)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [post.author_id, 'comment', '새 댓글', `${authorName}님이 "${post.title}" 글에 댓글을 남겼습니다.`, postId, c.id, req.user.id, authorName]
+        );
+      }
+    }
+
     res.json({
       id: c.id,
       postId: c.post_id,
@@ -819,8 +883,17 @@ app.post('/api/ai/chat', authMiddleware, async (req, res) => {
 
 app.get('/api/notices', authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM notices ORDER BY created_at DESC');
-    res.json(result.rows);
+    const result = await pool.query('SELECT * FROM notices ORDER BY is_pinned DESC, created_at DESC');
+    const notices = result.rows.map(n => ({
+      id: n.id,
+      title: n.title,
+      content: n.content,
+      authorId: n.author_id,
+      authorName: n.author_name || '관리자',
+      isPinned: n.is_pinned || false,
+      createdAt: n.created_at
+    }));
+    res.json(notices);
   } catch (error) {
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
@@ -832,7 +905,154 @@ app.get('/api/notices/:id', authMiddleware, async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ message: '공지사항을 찾을 수 없습니다.' });
     }
-    res.json(result.rows[0]);
+    const n = result.rows[0];
+    res.json({
+      id: n.id,
+      title: n.title,
+      content: n.content,
+      authorId: n.author_id,
+      authorName: n.author_name || '관리자',
+      isPinned: n.is_pinned || false,
+      createdAt: n.created_at
+    });
+  } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+app.post('/api/notices', authMiddleware, async (req, res) => {
+  try {
+    if (!req.user.is_admin) {
+      return res.status(403).json({ message: '관리자만 공지사항을 작성할 수 있습니다.' });
+    }
+
+    const { title, content, isPinned } = req.body;
+
+    if (!title || !content) {
+      return res.status(400).json({ message: '제목과 내용을 입력해주세요.' });
+    }
+
+    const result = await pool.query(
+      'INSERT INTO notices (title, content, author_id, author_name, is_pinned) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [title, content, req.user.id, req.user.name, isPinned || false]
+    );
+
+    const n = result.rows[0];
+    res.json({
+      id: n.id,
+      title: n.title,
+      content: n.content,
+      authorId: n.author_id,
+      authorName: n.author_name,
+      isPinned: n.is_pinned,
+      createdAt: n.created_at
+    });
+  } catch (error) {
+    console.error('Create notice error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+app.delete('/api/notices/:id', authMiddleware, async (req, res) => {
+  try {
+    if (!req.user.is_admin) {
+      return res.status(403).json({ message: '관리자만 공지사항을 삭제할 수 있습니다.' });
+    }
+
+    await pool.query('DELETE FROM notices WHERE id = $1', [req.params.id]);
+    res.json({ message: '공지사항이 삭제되었습니다.' });
+  } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// ==================== Notification API ====================
+
+// 알림 목록 조회
+app.get('/api/notifications', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50',
+      [req.user.id]
+    );
+
+    const notifications = result.rows.map(n => ({
+      id: n.id,
+      type: n.type,
+      title: n.title,
+      message: n.message,
+      postId: n.post_id,
+      commentId: n.comment_id,
+      fromUserId: n.from_user_id,
+      fromUserName: n.from_user_name,
+      isRead: n.is_read,
+      createdAt: n.created_at
+    }));
+
+    res.json(notifications);
+  } catch (error) {
+    console.error('Get notifications error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 읽지 않은 알림 개수
+app.get('/api/notifications/unread-count', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND is_read = FALSE',
+      [req.user.id]
+    );
+    res.json({ count: parseInt(result.rows[0].count) });
+  } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 알림 읽음 처리
+app.post('/api/notifications/:id/read', authMiddleware, async (req, res) => {
+  try {
+    await pool.query(
+      'UPDATE notifications SET is_read = TRUE WHERE id = $1 AND user_id = $2',
+      [req.params.id, req.user.id]
+    );
+    res.json({ message: '알림을 읽음 처리했습니다.' });
+  } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 모든 알림 읽음 처리
+app.post('/api/notifications/read-all', authMiddleware, async (req, res) => {
+  try {
+    await pool.query(
+      'UPDATE notifications SET is_read = TRUE WHERE user_id = $1',
+      [req.user.id]
+    );
+    res.json({ message: '모든 알림을 읽음 처리했습니다.' });
+  } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 알림 삭제
+app.delete('/api/notifications/:id', authMiddleware, async (req, res) => {
+  try {
+    await pool.query(
+      'DELETE FROM notifications WHERE id = $1 AND user_id = $2',
+      [req.params.id, req.user.id]
+    );
+    res.json({ message: '알림이 삭제되었습니다.' });
+  } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 모든 알림 삭제
+app.delete('/api/notifications', authMiddleware, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM notifications WHERE user_id = $1', [req.user.id]);
+    res.json({ message: '모든 알림이 삭제되었습니다.' });
   } catch (error) {
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
