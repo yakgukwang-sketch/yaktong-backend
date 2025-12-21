@@ -647,7 +647,11 @@ app.post('/api/posts/:id/like', authMiddleware, async (req, res) => {
     const postId = parseInt(req.params.id);
 
     // Remove dislike if exists (can't like and dislike at same time)
-    await pool.query('DELETE FROM post_dislikes WHERE post_id = $1 AND user_id = $2', [postId, req.user.id]);
+    const existingDislike = await pool.query('SELECT id FROM post_dislikes WHERE post_id = $1 AND user_id = $2', [postId, req.user.id]);
+    if (existingDislike.rows.length > 0) {
+      await pool.query('DELETE FROM post_dislikes WHERE post_id = $1 AND user_id = $2', [postId, req.user.id]);
+      await pool.query('UPDATE posts SET dislike_count = dislike_count - 1 WHERE id = $1', [postId]);
+    }
 
     const existingLike = await pool.query(
       'SELECT id FROM post_likes WHERE post_id = $1 AND user_id = $2',
@@ -856,7 +860,11 @@ app.post('/api/comments/:id/like', authMiddleware, async (req, res) => {
     const commentId = parseInt(req.params.id);
 
     // Remove dislike if exists (can't like and dislike at same time)
-    await pool.query('DELETE FROM comment_dislikes WHERE comment_id = $1 AND user_id = $2', [commentId, req.user.id]);
+    const existingDislike = await pool.query('SELECT id FROM comment_dislikes WHERE comment_id = $1 AND user_id = $2', [commentId, req.user.id]);
+    if (existingDislike.rows.length > 0) {
+      await pool.query('DELETE FROM comment_dislikes WHERE comment_id = $1 AND user_id = $2', [commentId, req.user.id]);
+      await pool.query('UPDATE comments SET dislike_count = dislike_count - 1 WHERE id = $1', [commentId]);
+    }
 
     const existingLike = await pool.query(
       'SELECT id FROM comment_likes WHERE comment_id = $1 AND user_id = $2',
@@ -884,7 +892,11 @@ app.post('/api/comments/:id/dislike', authMiddleware, async (req, res) => {
     const commentId = parseInt(req.params.id);
 
     // Remove like if exists (can't like and dislike at same time)
-    await pool.query('DELETE FROM comment_likes WHERE comment_id = $1 AND user_id = $2', [commentId, req.user.id]);
+    const existingLike = await pool.query('SELECT id FROM comment_likes WHERE comment_id = $1 AND user_id = $2', [commentId, req.user.id]);
+    if (existingLike.rows.length > 0) {
+      await pool.query('DELETE FROM comment_likes WHERE comment_id = $1 AND user_id = $2', [commentId, req.user.id]);
+      await pool.query('UPDATE comments SET like_count = like_count - 1 WHERE id = $1', [commentId]);
+    }
 
     const existingDislike = await pool.query(
       'SELECT id FROM comment_dislikes WHERE comment_id = $1 AND user_id = $2',
