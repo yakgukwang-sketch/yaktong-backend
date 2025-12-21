@@ -1070,6 +1070,44 @@ app.post('/api/notices', authMiddleware, async (req, res) => {
   }
 });
 
+app.put('/api/notices/:id', authMiddleware, async (req, res) => {
+  try {
+    if (!req.user.is_admin) {
+      return res.status(403).json({ message: '관리자만 공지사항을 수정할 수 있습니다.' });
+    }
+
+    const { title, content, isPinned } = req.body;
+    const noticeId = parseInt(req.params.id);
+
+    const result = await pool.query(
+      `UPDATE notices
+       SET title = $1, content = $2, is_pinned = $3, updated_at = NOW()
+       WHERE id = $4
+       RETURNING *`,
+      [title, content, isPinned || false, noticeId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: '공지사항을 찾을 수 없습니다.' });
+    }
+
+    const notice = result.rows[0];
+    res.json({
+      id: notice.id,
+      title: notice.title,
+      content: notice.content,
+      authorId: notice.author_id,
+      authorName: req.user.name,
+      isPinned: notice.is_pinned,
+      createdAt: notice.created_at,
+      updatedAt: notice.updated_at,
+    });
+  } catch (error) {
+    console.error('Update notice error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
 app.delete('/api/notices/:id', authMiddleware, async (req, res) => {
   try {
     if (!req.user.is_admin) {
