@@ -184,6 +184,34 @@ async function initDB() {
       )
     `);
 
+    // Add dislike_count to posts and comments
+    await pool.query(`
+      ALTER TABLE posts ADD COLUMN IF NOT EXISTS dislike_count INTEGER DEFAULT 0
+    `);
+    await pool.query(`
+      ALTER TABLE comments ADD COLUMN IF NOT EXISTS dislike_count INTEGER DEFAULT 0
+    `);
+
+    // Post dislikes table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS post_dislikes (
+        id SERIAL PRIMARY KEY,
+        post_id INTEGER REFERENCES posts(id) ON DELETE CASCADE,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        UNIQUE(post_id, user_id)
+      )
+    `);
+
+    // Comment dislikes table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS comment_dislikes (
+        id SERIAL PRIMARY KEY,
+        comment_id INTEGER REFERENCES comments(id) ON DELETE CASCADE,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        UNIQUE(comment_id, user_id)
+      )
+    `);
+
     // Insert default notice if none exists
     const noticeCheck = await pool.query('SELECT COUNT(*) FROM notices');
     if (parseInt(noticeCheck.rows[0].count) === 0) {
@@ -545,6 +573,11 @@ app.get('/api/posts/:id', authMiddleware, async (req, res) => {
       [postId, req.user.id]
     );
 
+    const dislikeResult = await pool.query(
+      'SELECT id FROM post_dislikes WHERE post_id = $1 AND user_id = $2',
+      [postId, req.user.id]
+    );
+
     const p = result.rows[0];
     res.json({
       id: p.id,
@@ -556,10 +589,12 @@ app.get('/api/posts/:id', authMiddleware, async (req, res) => {
       authorName: p.author_name,
       realAuthorName: isAdmin && p.is_anonymous ? p.real_author_name : null,
       likeCount: p.like_count,
+      dislikeCount: p.dislike_count || 0,
       commentCount: p.comment_count,
       viewCount: p.view_count,
       createdAt: p.created_at,
-      isLiked: likeResult.rows.length > 0
+      isLiked: likeResult.rows.length > 0,
+      isDisliked: dislikeResult.rows.length > 0
     });
   } catch (error) {
     console.error('Get post error:', error);
@@ -611,6 +646,9 @@ app.post('/api/posts/:id/like', authMiddleware, async (req, res) => {
   try {
     const postId = parseInt(req.params.id);
 
+    // Remove dislike if exists (can't like and dislike at same time)
+    await pool.query('DELETE FROM post_dislikes WHERE post_id = $1 AND user_id = $2', [postId, req.user.id]);
+
     const existingLike = await pool.query(
       'SELECT id FROM post_likes WHERE post_id = $1 AND user_id = $2',
       [postId, req.user.id]
@@ -619,12 +657,12 @@ app.post('/api/posts/:id/like', authMiddleware, async (req, res) => {
     if (existingLike.rows.length > 0) {
       await pool.query('DELETE FROM post_likes WHERE post_id = $1 AND user_id = $2', [postId, req.user.id]);
       await pool.query('UPDATE posts SET like_count = like_count - 1 WHERE id = $1', [postId]);
-      const result = await pool.query('SELECT like_count FROM posts WHERE id = $1', [postId]);
-      res.json({ liked: false, likeCount: result.rows[0].like_count });
+      const result = await pool.query('SELECT like_count, dislike_count FROM posts WHERE id = $1', [postId]);
+      res.json({ liked: false, likeCount: result.rows[0].like_count, dislikeCount: result.rows[0].dislike_count });
     } else {
       await pool.query('INSERT INTO post_likes (post_id, user_id) VALUES ($1, $2)', [postId, req.user.id]);
       await pool.query('UPDATE posts SET like_count = like_count + 1 WHERE id = $1', [postId]);
-      const result = await pool.query('SELECT like_count, author_id, title FROM posts WHERE id = $1', [postId]);
+      const result = await pool.query('SELECT like_count, dislike_count, author_id, title FROM posts WHERE id = $1', [postId]);
 
       // 알림 생성 (자신의 글에 좋아요한 경우 제외)
       const postAuthorId = result.rows[0].author_id;
@@ -636,10 +674,43 @@ app.post('/api/posts/:id/like', authMiddleware, async (req, res) => {
         );
       }
 
-      res.json({ liked: true, likeCount: result.rows[0].like_count });
+      res.json({ liked: true, likeCount: result.rows[0].like_count, dislikeCount: result.rows[0].dislike_count });
     }
   } catch (error) {
     console.error('Like post error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+app.post('/api/posts/:id/dislike', authMiddleware, async (req, res) => {
+  try {
+    const postId = parseInt(req.params.id);
+
+    // Remove like if exists (can't like and dislike at same time)
+    const existingLike = await pool.query('SELECT id FROM post_likes WHERE post_id = $1 AND user_id = $2', [postId, req.user.id]);
+    if (existingLike.rows.length > 0) {
+      await pool.query('DELETE FROM post_likes WHERE post_id = $1 AND user_id = $2', [postId, req.user.id]);
+      await pool.query('UPDATE posts SET like_count = like_count - 1 WHERE id = $1', [postId]);
+    }
+
+    const existingDislike = await pool.query(
+      'SELECT id FROM post_dislikes WHERE post_id = $1 AND user_id = $2',
+      [postId, req.user.id]
+    );
+
+    if (existingDislike.rows.length > 0) {
+      await pool.query('DELETE FROM post_dislikes WHERE post_id = $1 AND user_id = $2', [postId, req.user.id]);
+      await pool.query('UPDATE posts SET dislike_count = dislike_count - 1 WHERE id = $1', [postId]);
+      const result = await pool.query('SELECT like_count, dislike_count FROM posts WHERE id = $1', [postId]);
+      res.json({ disliked: false, likeCount: result.rows[0].like_count, dislikeCount: result.rows[0].dislike_count });
+    } else {
+      await pool.query('INSERT INTO post_dislikes (post_id, user_id) VALUES ($1, $2)', [postId, req.user.id]);
+      await pool.query('UPDATE posts SET dislike_count = dislike_count + 1 WHERE id = $1', [postId]);
+      const result = await pool.query('SELECT like_count, dislike_count FROM posts WHERE id = $1', [postId]);
+      res.json({ disliked: true, likeCount: result.rows[0].like_count, dislikeCount: result.rows[0].dislike_count });
+    }
+  } catch (error) {
+    console.error('Dislike post error:', error);
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
 });
@@ -784,6 +855,9 @@ app.post('/api/comments/:id/like', authMiddleware, async (req, res) => {
   try {
     const commentId = parseInt(req.params.id);
 
+    // Remove dislike if exists (can't like and dislike at same time)
+    await pool.query('DELETE FROM comment_dislikes WHERE comment_id = $1 AND user_id = $2', [commentId, req.user.id]);
+
     const existingLike = await pool.query(
       'SELECT id FROM comment_likes WHERE comment_id = $1 AND user_id = $2',
       [commentId, req.user.id]
@@ -792,13 +866,44 @@ app.post('/api/comments/:id/like', authMiddleware, async (req, res) => {
     if (existingLike.rows.length > 0) {
       await pool.query('DELETE FROM comment_likes WHERE comment_id = $1 AND user_id = $2', [commentId, req.user.id]);
       await pool.query('UPDATE comments SET like_count = like_count - 1 WHERE id = $1', [commentId]);
-      res.json({ liked: false });
+      const result = await pool.query('SELECT like_count, dislike_count FROM comments WHERE id = $1', [commentId]);
+      res.json({ liked: false, likeCount: result.rows[0].like_count, dislikeCount: result.rows[0].dislike_count });
     } else {
       await pool.query('INSERT INTO comment_likes (comment_id, user_id) VALUES ($1, $2)', [commentId, req.user.id]);
       await pool.query('UPDATE comments SET like_count = like_count + 1 WHERE id = $1', [commentId]);
-      res.json({ liked: true });
+      const result = await pool.query('SELECT like_count, dislike_count FROM comments WHERE id = $1', [commentId]);
+      res.json({ liked: true, likeCount: result.rows[0].like_count, dislikeCount: result.rows[0].dislike_count });
     }
   } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+app.post('/api/comments/:id/dislike', authMiddleware, async (req, res) => {
+  try {
+    const commentId = parseInt(req.params.id);
+
+    // Remove like if exists (can't like and dislike at same time)
+    await pool.query('DELETE FROM comment_likes WHERE comment_id = $1 AND user_id = $2', [commentId, req.user.id]);
+
+    const existingDislike = await pool.query(
+      'SELECT id FROM comment_dislikes WHERE comment_id = $1 AND user_id = $2',
+      [commentId, req.user.id]
+    );
+
+    if (existingDislike.rows.length > 0) {
+      await pool.query('DELETE FROM comment_dislikes WHERE comment_id = $1 AND user_id = $2', [commentId, req.user.id]);
+      await pool.query('UPDATE comments SET dislike_count = dislike_count - 1 WHERE id = $1', [commentId]);
+      const result = await pool.query('SELECT like_count, dislike_count FROM comments WHERE id = $1', [commentId]);
+      res.json({ disliked: false, likeCount: result.rows[0].like_count, dislikeCount: result.rows[0].dislike_count });
+    } else {
+      await pool.query('INSERT INTO comment_dislikes (comment_id, user_id) VALUES ($1, $2)', [commentId, req.user.id]);
+      await pool.query('UPDATE comments SET dislike_count = dislike_count + 1 WHERE id = $1', [commentId]);
+      const result = await pool.query('SELECT like_count, dislike_count FROM comments WHERE id = $1', [commentId]);
+      res.json({ disliked: true, likeCount: result.rows[0].like_count, dislikeCount: result.rows[0].dislike_count });
+    }
+  } catch (error) {
+    console.error('Comment dislike error:', error);
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
 });
