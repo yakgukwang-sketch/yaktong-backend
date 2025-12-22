@@ -212,6 +212,59 @@ async function initDB() {
       )
     `);
 
+    // Jobs table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS jobs (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        type VARCHAR(20) DEFAULT 'hiring',
+        work_type VARCHAR(50) DEFAULT '풀타임',
+        category VARCHAR(50) DEFAULT '약국',
+        location VARCHAR(100),
+        address TEXT,
+        latitude DECIMAL(10, 8),
+        longitude DECIMAL(11, 8),
+        work_days VARCHAR(100),
+        work_hours VARCHAR(100),
+        salary_min INTEGER,
+        salary_max INTEGER,
+        salary_negotiable BOOLEAN DEFAULT FALSE,
+        salary_type VARCHAR(20) DEFAULT '월급',
+        is_after_tax BOOLEAN DEFAULT FALSE,
+        software VARCHAR(100),
+        dispenser VARCHAR(100),
+        automation TEXT,
+        pharmacist_count INTEGER,
+        staff_count INTEGER,
+        benefits TEXT,
+        description TEXT,
+        contact_phone VARCHAR(50),
+        author_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        author_name VARCHAR(100),
+        view_count INTEGER DEFAULT 0,
+        apply_count INTEGER DEFAULT 0,
+        is_premium BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        bumped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Add salary_type column if not exists (for existing DB)
+    await pool.query(`
+      ALTER TABLE jobs ADD COLUMN IF NOT EXISTS salary_type VARCHAR(20) DEFAULT '월급'
+    `);
+
+    // Job bookmarks table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS job_bookmarks (
+        id SERIAL PRIMARY KEY,
+        job_id INTEGER REFERENCES jobs(id) ON DELETE CASCADE,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(job_id, user_id)
+      )
+    `);
+
     // Insert default notice if none exists
     const noticeCheck = await pool.query('SELECT COUNT(*) FROM notices');
     if (parseInt(noticeCheck.rows[0].count) === 0) {
@@ -1208,6 +1261,323 @@ app.delete('/api/notifications', authMiddleware, async (req, res) => {
   try {
     await pool.query('DELETE FROM notifications WHERE user_id = $1', [req.user.id]);
     res.json({ message: '모든 알림이 삭제되었습니다.' });
+  } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// ==================== Job API ====================
+
+// 구인구직 목록 조회
+app.get('/api/jobs', authMiddleware, async (req, res) => {
+  try {
+    const { type, category, workType, region, page = 1, limit = 20 } = req.query;
+    const offset = (page - 1) * limit;
+
+    let query = `
+      SELECT j.*,
+        EXISTS(SELECT 1 FROM job_bookmarks WHERE job_id = j.id AND user_id = $1) as is_bookmarked
+      FROM jobs j WHERE 1=1
+    `;
+    const params = [req.user.id];
+    let paramIndex = 2;
+
+    if (type && type !== 'all') {
+      query += ` AND j.type = $${paramIndex}`;
+      params.push(type);
+      paramIndex++;
+    }
+
+    if (category && category !== 'all') {
+      query += ` AND j.category = $${paramIndex}`;
+      params.push(category);
+      paramIndex++;
+    }
+
+    if (workType && workType !== 'all') {
+      query += ` AND j.work_type = $${paramIndex}`;
+      params.push(workType);
+      paramIndex++;
+    }
+
+    if (region && region !== 'all') {
+      query += ` AND j.location LIKE $${paramIndex}`;
+      params.push(`%${region}%`);
+      paramIndex++;
+    }
+
+    query += ` ORDER BY j.is_premium DESC, j.bumped_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    params.push(limit, offset);
+
+    const result = await pool.query(query, params);
+
+    const jobs = result.rows.map(j => ({
+      id: j.id,
+      title: j.title,
+      type: j.type,
+      workType: j.work_type,
+      category: j.category,
+      location: j.location,
+      address: j.address,
+      latitude: j.latitude ? parseFloat(j.latitude) : null,
+      longitude: j.longitude ? parseFloat(j.longitude) : null,
+      workDays: j.work_days,
+      workHours: j.work_hours,
+      salaryMin: j.salary_min,
+      salaryMax: j.salary_max,
+      salaryNegotiable: j.salary_negotiable,
+      salaryType: j.salary_type || '월급',
+      isAfterTax: j.is_after_tax,
+      software: j.software,
+      dispenser: j.dispenser,
+      automation: j.automation,
+      pharmacistCount: j.pharmacist_count,
+      staffCount: j.staff_count,
+      benefits: j.benefits,
+      description: j.description,
+      contactPhone: j.contact_phone,
+      authorId: j.author_id,
+      authorName: j.author_name,
+      viewCount: j.view_count,
+      applyCount: j.apply_count,
+      isBookmarked: j.is_bookmarked,
+      isPremium: j.is_premium,
+      createdAt: j.created_at,
+      bumpedAt: j.bumped_at
+    }));
+
+    res.json(jobs);
+  } catch (error) {
+    console.error('Get jobs error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 북마크한 공고 목록 (MUST be before /api/jobs/:id)
+app.get('/api/jobs/bookmarked/list', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT j.*, true as is_bookmarked
+      FROM jobs j
+      INNER JOIN job_bookmarks jb ON j.id = jb.job_id
+      WHERE jb.user_id = $1
+      ORDER BY jb.created_at DESC
+    `, [req.user.id]);
+
+    const jobs = result.rows.map(j => ({
+      id: j.id,
+      title: j.title,
+      type: j.type,
+      workType: j.work_type,
+      category: j.category,
+      location: j.location,
+      workDays: j.work_days,
+      salaryMin: j.salary_min,
+      salaryMax: j.salary_max,
+      salaryNegotiable: j.salary_negotiable,
+      salaryType: j.salary_type || '월급',
+      isAfterTax: j.is_after_tax,
+      viewCount: j.view_count,
+      applyCount: j.apply_count,
+      isBookmarked: true,
+      isPremium: j.is_premium,
+      createdAt: j.created_at,
+      bumpedAt: j.bumped_at
+    }));
+
+    res.json(jobs);
+  } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 구인구직 상세 조회
+app.get('/api/jobs/:id', authMiddleware, async (req, res) => {
+  try {
+    const jobId = parseInt(req.params.id);
+
+    // 조회수 증가
+    await pool.query('UPDATE jobs SET view_count = view_count + 1 WHERE id = $1', [jobId]);
+
+    const result = await pool.query(`
+      SELECT j.*,
+        EXISTS(SELECT 1 FROM job_bookmarks WHERE job_id = j.id AND user_id = $1) as is_bookmarked
+      FROM jobs j WHERE j.id = $2
+    `, [req.user.id, jobId]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: '공고를 찾을 수 없습니다.' });
+    }
+
+    const j = result.rows[0];
+    res.json({
+      id: j.id,
+      title: j.title,
+      type: j.type,
+      workType: j.work_type,
+      category: j.category,
+      location: j.location,
+      address: j.address,
+      latitude: j.latitude ? parseFloat(j.latitude) : null,
+      longitude: j.longitude ? parseFloat(j.longitude) : null,
+      workDays: j.work_days,
+      workHours: j.work_hours,
+      salaryMin: j.salary_min,
+      salaryMax: j.salary_max,
+      salaryNegotiable: j.salary_negotiable,
+      salaryType: j.salary_type || '월급',
+      isAfterTax: j.is_after_tax,
+      software: j.software,
+      dispenser: j.dispenser,
+      automation: j.automation,
+      pharmacistCount: j.pharmacist_count,
+      staffCount: j.staff_count,
+      benefits: j.benefits,
+      description: j.description,
+      contactPhone: j.contact_phone,
+      authorId: j.author_id,
+      authorName: j.author_name,
+      viewCount: j.view_count,
+      applyCount: j.apply_count,
+      isBookmarked: j.is_bookmarked,
+      isPremium: j.is_premium,
+      createdAt: j.created_at,
+      bumpedAt: j.bumped_at
+    });
+  } catch (error) {
+    console.error('Get job error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 구인구직 등록
+app.post('/api/jobs', authMiddleware, async (req, res) => {
+  try {
+    const {
+      title, type, workType, category, location, address,
+      latitude, longitude, workDays, workHours,
+      salaryMin, salaryMax, salaryNegotiable, salaryType, isAfterTax,
+      software, dispenser, automation,
+      pharmacistCount, staffCount, benefits, description, contactPhone
+    } = req.body;
+
+    const result = await pool.query(`
+      INSERT INTO jobs (
+        title, type, work_type, category, location, address,
+        latitude, longitude, work_days, work_hours,
+        salary_min, salary_max, salary_negotiable, salary_type, is_after_tax,
+        software, dispenser, automation,
+        pharmacist_count, staff_count, benefits, description, contact_phone,
+        author_id, author_name
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+      RETURNING *
+    `, [
+      title, type || 'hiring', workType || '풀타임', category || '약국',
+      location, address, latitude, longitude, workDays, workHours,
+      salaryMin, salaryMax, salaryNegotiable || false, salaryType || '월급', isAfterTax || false,
+      software, dispenser, automation,
+      pharmacistCount, staffCount, benefits, description, contactPhone,
+      req.user.id, req.user.name
+    ]);
+
+    const j = result.rows[0];
+    res.json({
+      id: j.id,
+      title: j.title,
+      type: j.type,
+      workType: j.work_type,
+      category: j.category,
+      createdAt: j.created_at
+    });
+  } catch (error) {
+    console.error('Create job error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 구인구직 수정
+app.put('/api/jobs/:id', authMiddleware, async (req, res) => {
+  try {
+    const jobId = parseInt(req.params.id);
+    const {
+      title, workType, category, location, address,
+      latitude, longitude, workDays, workHours,
+      salaryMin, salaryMax, salaryNegotiable, isAfterTax,
+      software, dispenser, automation,
+      pharmacistCount, staffCount, benefits, description, contactPhone
+    } = req.body;
+
+    const result = await pool.query(`
+      UPDATE jobs SET
+        title = $1, work_type = $2, category = $3, location = $4, address = $5,
+        latitude = $6, longitude = $7, work_days = $8, work_hours = $9,
+        salary_min = $10, salary_max = $11, salary_negotiable = $12, is_after_tax = $13,
+        software = $14, dispenser = $15, automation = $16,
+        pharmacist_count = $17, staff_count = $18, benefits = $19, description = $20, contact_phone = $21
+      WHERE id = $22 AND author_id = $23
+      RETURNING *
+    `, [
+      title, workType, category, location, address,
+      latitude, longitude, workDays, workHours,
+      salaryMin, salaryMax, salaryNegotiable, isAfterTax,
+      software, dispenser, automation,
+      pharmacistCount, staffCount, benefits, description, contactPhone,
+      jobId, req.user.id
+    ]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: '공고를 찾을 수 없거나 권한이 없습니다.' });
+    }
+
+    res.json({ message: '공고가 수정되었습니다.' });
+  } catch (error) {
+    console.error('Update job error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 구인구직 삭제
+app.delete('/api/jobs/:id', authMiddleware, async (req, res) => {
+  try {
+    const jobId = parseInt(req.params.id);
+    await pool.query('DELETE FROM jobs WHERE id = $1 AND author_id = $2', [jobId, req.user.id]);
+    res.json({ message: '공고가 삭제되었습니다.' });
+  } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 북마크 토글
+app.post('/api/jobs/:id/bookmark', authMiddleware, async (req, res) => {
+  try {
+    const jobId = parseInt(req.params.id);
+
+    const existing = await pool.query(
+      'SELECT id FROM job_bookmarks WHERE job_id = $1 AND user_id = $2',
+      [jobId, req.user.id]
+    );
+
+    if (existing.rows.length > 0) {
+      await pool.query('DELETE FROM job_bookmarks WHERE job_id = $1 AND user_id = $2', [jobId, req.user.id]);
+      res.json({ bookmarked: false });
+    } else {
+      await pool.query('INSERT INTO job_bookmarks (job_id, user_id) VALUES ($1, $2)', [jobId, req.user.id]);
+      res.json({ bookmarked: true });
+    }
+  } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 끌어올리기
+app.post('/api/jobs/:id/bump', authMiddleware, async (req, res) => {
+  try {
+    const jobId = parseInt(req.params.id);
+    await pool.query(
+      'UPDATE jobs SET bumped_at = NOW() WHERE id = $1 AND author_id = $2',
+      [jobId, req.user.id]
+    );
+    res.json({ message: '공고가 끌어올려졌습니다.' });
   } catch (error) {
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
