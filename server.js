@@ -1271,7 +1271,7 @@ app.delete('/api/notifications', authMiddleware, async (req, res) => {
 // 구인구직 목록 조회
 app.get('/api/jobs', authMiddleware, async (req, res) => {
   try {
-    const { type, category, workType, region, page = 1, limit = 20 } = req.query;
+    const { type, category, workType, region, sort = 'latest', page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
 
     let query = `
@@ -1306,7 +1306,9 @@ app.get('/api/jobs', authMiddleware, async (req, res) => {
       paramIndex++;
     }
 
-    query += ` ORDER BY j.is_premium DESC, j.bumped_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    // 정렬 옵션: latest(최신순), bumped(끌어올리기순)
+    const orderBy = sort === 'bumped' ? 'j.bumped_at DESC' : 'j.created_at DESC';
+    query += ` ORDER BY j.is_premium DESC, ${orderBy} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
     params.push(limit, offset);
 
     const result = await pool.query(query, params);
