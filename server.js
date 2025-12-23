@@ -1483,21 +1483,23 @@ app.get('/api/jobs', authMiddleware, async (req, res) => {
       }
     }
 
-    // 정렬 옵션: recommended(추천순=최신순, 나중에 광고용), nearest(가까운순), popular(인기도순), latest(최신순)
+    // 정렬 옵션: recommended(추천순), nearest(가까운순), popular(인기도순), latest(최신순)
     let orderBy;
     switch (sort) {
       case 'nearest':
         // 가까운순은 일단 기본 정렬, 클라이언트에서 계산한 거리로 재정렬
-        orderBy = 'j.created_at DESC';
+        orderBy = 'COALESCE(j.bumped_at, j.created_at) DESC';
         break;
       case 'popular':
         orderBy = 'bookmark_count DESC, j.view_count DESC';
         break;
-      case 'recommended':
       case 'latest':
-      default:
-        // 추천순 = 최신순 (나중에 광고 기능 추가 예정)
         orderBy = 'j.created_at DESC';
+        break;
+      case 'recommended':
+      default:
+        // 추천순: 끌어올리기 시간 우선, 없으면 생성 시간
+        orderBy = 'COALESCE(j.bumped_at, j.created_at) DESC';
         break;
     }
     query += ` ORDER BY j.is_premium DESC, ${orderBy} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
