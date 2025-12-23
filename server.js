@@ -1010,7 +1010,7 @@ app.post('/api/ai/chat', authMiddleware, async (req, res) => {
 
     // generateContent로 호출 (file_search 확실히 작동)
     const result = await ai.models.generateContent({
-      model: "gemini-3-flash",
+      model: "gemini-2.5-flash",
       contents: aiSessions[sessionId],
       config: {
         temperature: 0.3,
