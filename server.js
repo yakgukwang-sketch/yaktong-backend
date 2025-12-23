@@ -461,7 +461,7 @@ app.get('/api/posts', authMiddleware, async (req, res) => {
     const offset = (page - 1) * limit;
     const isAdmin = req.user.is_admin;
 
-    let query = 'SELECT p.*, u.name as real_author_name FROM posts p LEFT JOIN users u ON p.author_id = u.id';
+    let query = 'SELECT p.*, u.name as real_author_name, u.profile_image as author_profile_image FROM posts p LEFT JOIN users u ON p.author_id = u.id';
     let params = [];
 
     if (category && category !== 'all') {
@@ -482,6 +482,7 @@ app.get('/api/posts', authMiddleware, async (req, res) => {
       isAnonymous: p.is_anonymous,
       authorId: p.author_id,
       authorName: p.author_name,
+      authorProfileImage: p.is_anonymous ? null : p.author_profile_image,
       realAuthorName: isAdmin && p.is_anonymous ? p.real_author_name : null,
       likeCount: p.like_count,
       commentCount: p.comment_count,
