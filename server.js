@@ -1558,9 +1558,20 @@ app.get('/api/jobs', authMiddleware, async (req, res) => {
     }
 
     if (region && region !== 'all') {
-      query += ` AND j.location LIKE $${paramIndex}`;
-      params.push(`%${region}%`);
-      paramIndex++;
+      // "서울 종로구" 같은 형태면 메인/서브 지역 분리
+      const regionParts = region.split(' ');
+      if (regionParts.length > 1 && regionParts[1] !== '전체') {
+        // 서브 지역(구/군)으로 필터링 - address에서 검색
+        query += ` AND (j.location = $${paramIndex} AND j.address LIKE $${paramIndex + 1})`;
+        params.push(regionParts[0], `%${regionParts[1]}%`);
+        paramIndex += 2;
+      } else {
+        // 메인 지역만 필터링
+        const mainRegion = regionParts[0];
+        query += ` AND j.location = $${paramIndex}`;
+        params.push(mainRegion);
+        paramIndex++;
+      }
     }
 
     // 정렬 옵션: latest(최신순), bumped(끌어올리기순)
