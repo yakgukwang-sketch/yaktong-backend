@@ -663,12 +663,15 @@ app.get('/api/posts/:id', authMiddleware, async (req, res) => {
 
 app.post('/api/posts', authMiddleware, async (req, res) => {
   try {
-    const { title, content, category, isAnonymous } = req.body;
+    const { title, content, category, isAnonymous, images } = req.body;
     const authorName = isAnonymous ? '익명' : req.user.name;
 
+    // images 배열을 JSON 문자열로 변환
+    const imagesJson = images && images.length > 0 ? JSON.stringify(images) : null;
+
     const result = await pool.query(
-      'INSERT INTO posts (title, content, category, is_anonymous, author_id, author_name) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [title, content, category || 'daily', isAnonymous || false, req.user.id, authorName]
+      'INSERT INTO posts (title, content, category, is_anonymous, author_id, author_name, images) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+      [title, content, category || 'daily', isAnonymous || false, req.user.id, authorName, imagesJson]
     );
 
     const p = result.rows[0];
@@ -680,6 +683,7 @@ app.post('/api/posts', authMiddleware, async (req, res) => {
       isAnonymous: p.is_anonymous,
       authorId: p.author_id,
       authorName: p.author_name,
+      images: p.images ? JSON.parse(p.images) : [],
       likeCount: p.like_count,
       commentCount: p.comment_count,
       viewCount: p.view_count,
