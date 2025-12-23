@@ -1525,15 +1525,30 @@ app.delete('/api/notifications', authMiddleware, async (req, res) => {
 
 // ==================== Job API ====================
 
+// Haversine 거리 계산 (km)
+function calculateDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371; // 지구 반지름 (km)
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
 // 구인구직 목록 조회
 app.get('/api/jobs', authMiddleware, async (req, res) => {
   try {
-    const { type, category, workType, region, sort = 'latest', page = 1, limit = 20 } = req.query;
+    const { type, category, workType, region, sort = 'recommended', latitude, longitude, page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
+    const userLat = latitude ? parseFloat(latitude) : null;
+    const userLon = longitude ? parseFloat(longitude) : null;
 
     let query = `
       SELECT j.*,
-        EXISTS(SELECT 1 FROM job_bookmarks WHERE job_id = j.id AND user_id = $1) as is_bookmarked
+        EXISTS(SELECT 1 FROM job_bookmarks WHERE job_id = j.id AND user_id = $1) as is_bookmarked,
+        (SELECT COUNT(*) FROM job_bookmarks WHERE job_id = j.id) as bookmark_count
       FROM jobs j WHERE 1=1
     `;
     const params = [req.user.id];
@@ -1597,47 +1612,86 @@ app.get('/api/jobs', authMiddleware, async (req, res) => {
       }
     }
 
-    // 정렬 옵션: latest(최신순), bumped(끌어올리기순)
-    const orderBy = sort === 'bumped' ? 'j.bumped_at DESC' : 'j.created_at DESC';
+    // 정렬 옵션: recommended(추천순), nearest(가까운순), popular(인기도순), latest(최신순)
+    let orderBy;
+    switch (sort) {
+      case 'nearest':
+        // 가까운순은 일단 기본 정렬, 클라이언트에서 계산한 거리로 재정렬
+        orderBy = 'j.created_at DESC';
+        break;
+      case 'popular':
+        orderBy = 'bookmark_count DESC, j.view_count DESC';
+        break;
+      case 'latest':
+        orderBy = 'j.created_at DESC';
+        break;
+      case 'recommended':
+      default:
+        // 추천순: 최근 끌어올리기 + 프리미엄 + 최신순 복합
+        orderBy = 'COALESCE(j.bumped_at, j.created_at) DESC';
+        break;
+    }
     query += ` ORDER BY j.is_premium DESC, ${orderBy} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
     params.push(limit, offset);
 
     const result = await pool.query(query, params);
 
-    const jobs = result.rows.map(j => ({
-      id: j.id,
-      title: j.title,
-      type: j.type,
-      workType: j.work_type,
-      category: j.category,
-      location: j.location,
-      address: j.address,
-      latitude: j.latitude ? parseFloat(j.latitude) : null,
-      longitude: j.longitude ? parseFloat(j.longitude) : null,
-      workDays: j.work_days,
-      workHours: j.work_hours,
-      salaryMin: j.salary_min,
-      salaryMax: j.salary_max,
-      salaryNegotiable: j.salary_negotiable,
-      salaryType: j.salary_type || '월급',
-      isAfterTax: j.is_after_tax,
-      software: j.software,
-      dispenser: j.dispenser,
-      automation: j.automation,
-      pharmacistCount: j.pharmacist_count,
-      staffCount: j.staff_count,
-      benefits: j.benefits,
-      description: j.description,
-      contactPhone: j.contact_phone,
-      authorId: j.author_id,
-      authorName: j.author_name,
-      viewCount: j.view_count,
-      applyCount: j.apply_count,
-      isBookmarked: j.is_bookmarked,
-      isPremium: j.is_premium,
-      createdAt: j.created_at,
-      bumpedAt: j.bumped_at
-    }));
+    let jobs = result.rows.map(j => {
+      // 거리 계산
+      let distance = null;
+      if (userLat && userLon && j.latitude && j.longitude) {
+        distance = calculateDistance(userLat, userLon, parseFloat(j.latitude), parseFloat(j.longitude));
+      }
+
+      return {
+        id: j.id,
+        title: j.title,
+        type: j.type,
+        workType: j.work_type,
+        category: j.category,
+        location: j.location,
+        address: j.address,
+        latitude: j.latitude ? parseFloat(j.latitude) : null,
+        longitude: j.longitude ? parseFloat(j.longitude) : null,
+        distance: distance,
+        workDays: j.work_days,
+        workHours: j.work_hours,
+        salaryMin: j.salary_min,
+        salaryMax: j.salary_max,
+        salaryNegotiable: j.salary_negotiable,
+        salaryType: j.salary_type || '월급',
+        isAfterTax: j.is_after_tax,
+        software: j.software,
+        dispenser: j.dispenser,
+        automation: j.automation,
+        pharmacistCount: j.pharmacist_count,
+        staffCount: j.staff_count,
+        benefits: j.benefits,
+        description: j.description,
+        contactPhone: j.contact_phone,
+        authorId: j.author_id,
+        authorName: j.author_name,
+        viewCount: j.view_count,
+        applyCount: j.apply_count,
+        bookmarkCount: parseInt(j.bookmark_count) || 0,
+        isBookmarked: j.is_bookmarked,
+        isPremium: j.is_premium,
+        createdAt: j.created_at,
+        bumpedAt: j.bumped_at
+      };
+    });
+
+    // 가까운순 정렬 (거리가 있는 경우)
+    if (sort === 'nearest' && userLat && userLon) {
+      jobs.sort((a, b) => {
+        // 프리미엄 우선
+        if (a.isPremium !== b.isPremium) return b.isPremium ? 1 : -1;
+        // 거리순
+        if (a.distance === null) return 1;
+        if (b.distance === null) return -1;
+        return a.distance - b.distance;
+      });
+    }
 
     res.json(jobs);
   } catch (error) {
