@@ -1558,19 +1558,42 @@ app.get('/api/jobs', authMiddleware, async (req, res) => {
     }
 
     if (region && region !== 'all') {
+      // 지역명 매핑 (짧은 이름 -> 긴 이름)
+      const regionFullNames = {
+        '서울': '서울특별시',
+        '부산': '부산광역시',
+        '대구': '대구광역시',
+        '인천': '인천광역시',
+        '광주': '광주광역시',
+        '대전': '대전광역시',
+        '울산': '울산광역시',
+        '세종': '세종특별자치시',
+        '경기': '경기도',
+        '강원': '강원도',
+        '충북': '충청북도',
+        '충남': '충청남도',
+        '전북': '전라북도',
+        '전남': '전라남도',
+        '경북': '경상북도',
+        '경남': '경상남도',
+        '제주': '제주특별자치도'
+      };
+
       // "서울 종로구" 같은 형태면 메인/서브 지역 분리
       const regionParts = region.split(' ');
+      const shortName = regionParts[0];
+      const fullName = regionFullNames[shortName] || shortName;
+
       if (regionParts.length > 1 && regionParts[1] !== '전체') {
-        // 서브 지역(구/군)으로 필터링 - address에서 검색
-        query += ` AND (j.location = $${paramIndex} AND j.address LIKE $${paramIndex + 1})`;
-        params.push(regionParts[0], `%${regionParts[1]}%`);
-        paramIndex += 2;
+        // 서브 지역(구/군)으로 필터링 - location은 짧은/긴 이름 둘 다, address에서 구/군 검색
+        query += ` AND (j.location IN ($${paramIndex}, $${paramIndex + 1}) AND j.address LIKE $${paramIndex + 2})`;
+        params.push(shortName, fullName, `%${regionParts[1]}%`);
+        paramIndex += 3;
       } else {
-        // 메인 지역만 필터링
-        const mainRegion = regionParts[0];
-        query += ` AND j.location = $${paramIndex}`;
-        params.push(mainRegion);
-        paramIndex++;
+        // 메인 지역만 필터링 - 짧은/긴 이름 둘 다 매칭
+        query += ` AND j.location IN ($${paramIndex}, $${paramIndex + 1})`;
+        params.push(shortName, fullName);
+        paramIndex += 2;
       }
     }
 
