@@ -62,8 +62,61 @@ const AI_SYSTEM_PROMPT = `당신은 '약통'의 AI 어시스턴트입니다. 사
 - 반말/존댓말 사용자 스타일에 맞춤
 - 핵심만 빠르게 전달`;
 
-// 세션별 대화 히스토리 저장
-const aiSessions = {}; // { [sessionId]: Content[] }
+// 세션별 대화 히스토리 저장 (TTL + 최대 턴 제한)
+const aiSessions = new Map(); // sessionId -> { history: Content[], updatedAt: number }
+const MAX_TURNS = 30;
+const TTL_MS = 30 * 60 * 1000; // 30분
+
+function getSession(sessionId) {
+  const now = Date.now();
+  const s = aiSessions.get(sessionId);
+  if (s && (now - s.updatedAt) < TTL_MS) {
+    s.updatedAt = now;
+    return s;
+  }
+  const fresh = { history: [], updatedAt: now };
+  aiSessions.set(sessionId, fresh);
+  return fresh;
+}
+
+function pushTurn(session, content) {
+  session.history.push(content);
+  if (session.history.length > MAX_TURNS) {
+    session.history.splice(0, session.history.length - MAX_TURNS);
+  }
+}
+
+// 타임아웃 + 재시도 헬퍼
+async function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("AI_TIMEOUT")), ms)),
+  ]);
+}
+
+async function generateWithRetry(payload, retries = 2) {
+  let lastErr;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await withTimeout(ai.models.generateContent(payload), 35000);
+    } catch (e) {
+      lastErr = e;
+      const msg = String(e?.message ?? e);
+      const retryable = msg.includes("429") || msg.includes("503") || msg.includes("504") || msg.includes("RESOURCE_EXHAUSTED");
+      if (!retryable || i === retries) break;
+      await new Promise(r => setTimeout(r, 500 * (2 ** i)));
+    }
+  }
+  throw lastErr;
+}
+
+// 응답 텍스트 추출 (parts 전체 결합)
+function extractText(result) {
+  if (typeof result?.text === "string" && result.text.trim()) return result.text.trim();
+  const parts = result?.candidates?.[0]?.content?.parts ?? [];
+  const joined = parts.map(p => p?.text).filter(Boolean).join("").trim();
+  return joined;
+}
 
 // Middleware
 app.use(cors());
@@ -997,21 +1050,19 @@ app.post('/api/ai/chat', authMiddleware, async (req, res) => {
 
     const sessionId = req.body?.sessionId || `session_${req.user.id}_${Date.now()}`;
 
-    // 세션 초기화
-    if (!aiSessions[sessionId]) {
-      aiSessions[sessionId] = [];
-    }
+    // 세션 가져오기 (TTL 적용)
+    const session = getSession(sessionId);
 
     // user turn 추가
-    aiSessions[sessionId].push({
+    pushTurn(session, {
       role: "user",
       parts: [{ text: userMessage }]
     });
 
-    // generateContent로 호출 (file_search 확실히 작동)
-    const result = await ai.models.generateContent({
+    // generateContent 호출 (타임아웃 + 재시도 적용)
+    const result = await generateWithRetry({
       model: "gemini-2.5-flash",
-      contents: aiSessions[sessionId],
+      contents: session.history,
       config: {
         temperature: 0.3,
         systemInstruction: AI_SYSTEM_PROMPT,
@@ -1023,17 +1074,11 @@ app.post('/api/ai/chat', authMiddleware, async (req, res) => {
       },
     });
 
-    // 디버그 로그 (확인 후 삭제)
-    console.log("=== AI Debug ===");
-    console.log("userMessage:", userMessage);
-    console.log("Has groundingMetadata?:", !!result?.candidates?.[0]?.groundingMetadata);
-    console.log("Has citationMetadata?:", !!result?.candidates?.[0]?.citationMetadata);
-
     const candidate = result?.candidates?.[0];
 
     // model turn을 history에 추가
     if (candidate?.content) {
-      aiSessions[sessionId].push(candidate.content);
+      pushTurn(session, candidate.content);
     }
 
     // 근거 확인 (citations 있는지 체크)
@@ -1042,19 +1087,40 @@ app.post('/api/ai/chat', authMiddleware, async (req, res) => {
       !!candidate?.citationMetadata ||
       JSON.stringify(result).toLowerCase().includes("citation");
 
-    const responseText = result.text || candidate?.content?.parts?.[0]?.text || '';
+    // 응답 텍스트 추출 (parts 전체 결합)
+    const responseText = extractText(result);
+
+    // 빈 응답 처리
+    if (!responseText) {
+      console.warn("Empty model text", {
+        finishReason: candidate?.finishReason,
+        hasGrounding: !!candidate?.groundingMetadata,
+      });
+      return res.status(200).json({
+        response: "현재 요청에서 텍스트 응답이 생성되지 않았습니다. 질문을 조금 더 구체화해 주세요.",
+        sessionId,
+        hasCitations: false,
+      });
+    }
 
     res.json({
-      response: responseText.trim(),
+      response: responseText,
       sessionId,
-      hasCitations  // 프론트에서 근거 유무 표시용
+      hasCitations
     });
 
   } catch (error) {
-    console.error('AI Chat Error:', error);
-    res.status(500).json({
-      response: '죄송합니다. AI 서비스에 일시적인 문제가 발생했습니다.',
-      error: error.message
+    console.error('AI Chat Error:', error?.message || error, {
+      status: error?.status,
+      code: error?.code,
+    });
+
+    const isTimeout = error?.message === "AI_TIMEOUT";
+    res.status(isTimeout ? 504 : 500).json({
+      response: isTimeout
+        ? '응답 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.'
+        : '죄송합니다. AI 서비스에 일시적인 문제가 발생했습니다.',
+      error: error?.message
     });
   }
 });
