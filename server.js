@@ -5,10 +5,47 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { Pool } = require('pg');
 const { GoogleGenAI } = require('@google/genai');
+const nodemailer = require('nodemailer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'yaktong-secret-key-2024';
+
+// Email Transporter Setup (Gmail SMTP)
+const emailTransporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS  // Gmail 앱 비밀번호
+  }
+});
+
+// 인증코드 생성 (6자리 숫자)
+function generateVerificationCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+// 인증 이메일 발송
+async function sendVerificationEmail(email, code) {
+  const mailOptions = {
+    from: `"약통" <${process.env.EMAIL_USER}>`,
+    to: email,
+    subject: '[약통] 이메일 인증 코드',
+    html: `
+      <div style="font-family: 'Apple SD Gothic Neo', sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2 style="color: #5FC3B0;">약통 이메일 인증</h2>
+        <p>안녕하세요, 약통 회원가입을 위한 인증 코드입니다.</p>
+        <div style="background-color: #f5f5f5; padding: 20px; text-align: center; margin: 20px 0; border-radius: 8px;">
+          <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #333;">${code}</span>
+        </div>
+        <p style="color: #666;">이 코드는 10분간 유효합니다.</p>
+        <p style="color: #999; font-size: 12px;">본인이 요청하지 않았다면 이 이메일을 무시하세요.</p>
+      </div>
+    `
+  };
+
+  await emailTransporter.sendMail(mailOptions);
+}
 
 // PostgreSQL Setup
 const pool = new Pool({
@@ -141,6 +178,17 @@ async function initDB() {
     // Add profile_image column if not exists (for existing DB)
     await pool.query(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image TEXT
+    `);
+
+    // Add email verification columns
+    await pool.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT FALSE
+    `);
+    await pool.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_code VARCHAR(6)
+    `);
+    await pool.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_expires TIMESTAMP
     `);
 
     // Add is_blocked column if not exists (for existing DB)
@@ -362,24 +410,99 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ message: '모든 필드를 입력해주세요.' });
     }
 
-    const existingUser = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+    const existingUser = await pool.query('SELECT id, email_verified FROM users WHERE email = $1', [email]);
     if (existingUser.rows.length > 0) {
-      return res.status(400).json({ message: '이미 등록된 이메일입니다.' });
+      // 이미 인증된 사용자
+      if (existingUser.rows[0].email_verified) {
+        return res.status(400).json({ message: '이미 등록된 이메일입니다.' });
+      }
+      // 미인증 사용자 - 인증코드 재발송
+      const code = generateVerificationCode();
+      const expires = new Date(Date.now() + 10 * 60 * 1000); // 10분
+
+      await pool.query(
+        'UPDATE users SET verification_code = $1, verification_expires = $2 WHERE email = $3',
+        [code, expires, email]
+      );
+
+      await sendVerificationEmail(email, code);
+      return res.json({
+        message: '인증 코드가 이메일로 발송되었습니다.',
+        requiresVerification: true,
+        email
+      });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const userCount = await pool.query('SELECT COUNT(*) FROM users');
     const isAdmin = parseInt(userCount.rows[0].count) === 0;
 
+    // 인증 코드 생성
+    const code = generateVerificationCode();
+    const expires = new Date(Date.now() + 10 * 60 * 1000); // 10분
+
     const result = await pool.query(
-      'INSERT INTO users (email, password, name, is_admin) VALUES ($1, $2, $3, $4) RETURNING *',
-      [email, hashedPassword, name, isAdmin]
+      `INSERT INTO users (email, password, name, is_admin, email_verified, verification_code, verification_expires)
+       VALUES ($1, $2, $3, $4, FALSE, $5, $6) RETURNING *`,
+      [email, hashedPassword, name, isAdmin, code, expires]
     );
 
+    // 인증 이메일 발송
+    await sendVerificationEmail(email, code);
+
+    res.json({
+      message: '인증 코드가 이메일로 발송되었습니다.',
+      requiresVerification: true,
+      email
+    });
+  } catch (error) {
+    console.error('Register error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 이메일 인증 확인
+app.post('/api/auth/verify-email', async (req, res) => {
+  try {
+    const { email, code } = req.body;
+
+    if (!email || !code) {
+      return res.status(400).json({ message: '이메일과 인증 코드를 입력해주세요.' });
+    }
+
+    const result = await pool.query(
+      'SELECT * FROM users WHERE email = $1',
+      [email]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({ message: '등록되지 않은 이메일입니다.' });
+    }
+
     const user = result.rows[0];
+
+    if (user.email_verified) {
+      return res.status(400).json({ message: '이미 인증된 이메일입니다.' });
+    }
+
+    if (user.verification_code !== code) {
+      return res.status(400).json({ message: '인증 코드가 올바르지 않습니다.' });
+    }
+
+    if (new Date() > new Date(user.verification_expires)) {
+      return res.status(400).json({ message: '인증 코드가 만료되었습니다. 다시 시도해주세요.' });
+    }
+
+    // 인증 완료
+    await pool.query(
+      'UPDATE users SET email_verified = TRUE, verification_code = NULL, verification_expires = NULL WHERE id = $1',
+      [user.id]
+    );
+
     const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '30d' });
 
     res.json({
+      message: '이메일 인증이 완료되었습니다.',
       token,
       user: {
         id: user.id,
@@ -392,7 +515,45 @@ app.post('/api/auth/register', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Register error:', error);
+    console.error('Verify email error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 인증 코드 재발송
+app.post('/api/auth/resend-code', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ message: '이메일을 입력해주세요.' });
+    }
+
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({ message: '등록되지 않은 이메일입니다.' });
+    }
+
+    const user = result.rows[0];
+
+    if (user.email_verified) {
+      return res.status(400).json({ message: '이미 인증된 이메일입니다.' });
+    }
+
+    const code = generateVerificationCode();
+    const expires = new Date(Date.now() + 10 * 60 * 1000);
+
+    await pool.query(
+      'UPDATE users SET verification_code = $1, verification_expires = $2 WHERE id = $3',
+      [code, expires, user.id]
+    );
+
+    await sendVerificationEmail(email, code);
+
+    res.json({ message: '인증 코드가 재발송되었습니다.' });
+  } catch (error) {
+    console.error('Resend code error:', error);
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
 });
@@ -410,6 +571,26 @@ app.post('/api/auth/login', async (req, res) => {
     const isValidPassword = await bcrypt.compare(password, user.password);
     if (!isValidPassword) {
       return res.status(401).json({ message: '이메일 또는 비밀번호가 올바르지 않습니다.' });
+    }
+
+    // 이메일 인증 확인
+    if (!user.email_verified) {
+      // 인증 코드 재발송
+      const code = generateVerificationCode();
+      const expires = new Date(Date.now() + 10 * 60 * 1000);
+
+      await pool.query(
+        'UPDATE users SET verification_code = $1, verification_expires = $2 WHERE id = $3',
+        [code, expires, user.id]
+      );
+
+      await sendVerificationEmail(email, code);
+
+      return res.status(403).json({
+        message: '이메일 인증이 필요합니다. 인증 코드가 발송되었습니다.',
+        requiresVerification: true,
+        email
+      });
     }
 
     const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '30d' });
