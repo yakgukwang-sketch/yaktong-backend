@@ -502,7 +502,7 @@ app.get('/api/posts/search', authMiddleware, async (req, res) => {
   try {
     const { q } = req.query;
     const result = await pool.query(
-      "SELECT * FROM posts WHERE title ILIKE $1 OR content ILIKE $1 ORDER BY created_at DESC",
+      "SELECT p.*, u.profile_image as author_profile_image FROM posts p LEFT JOIN users u ON p.author_id = u.id WHERE p.title ILIKE $1 OR p.content ILIKE $1 ORDER BY p.created_at DESC",
       [`%${q}%`]
     );
 
@@ -514,6 +514,7 @@ app.get('/api/posts/search', authMiddleware, async (req, res) => {
       isAnonymous: p.is_anonymous,
       authorId: p.author_id,
       authorName: p.author_name,
+      authorProfileImage: p.is_anonymous ? null : p.author_profile_image,
       likeCount: p.like_count,
       commentCount: p.comment_count,
       viewCount: p.view_count,
@@ -529,7 +530,7 @@ app.get('/api/posts/search', authMiddleware, async (req, res) => {
 app.get('/api/posts/my', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT * FROM posts WHERE author_id = $1 ORDER BY created_at DESC',
+      'SELECT p.*, u.profile_image as author_profile_image FROM posts p LEFT JOIN users u ON p.author_id = u.id WHERE p.author_id = $1 ORDER BY p.created_at DESC',
       [req.user.id]
     );
 
@@ -541,6 +542,7 @@ app.get('/api/posts/my', authMiddleware, async (req, res) => {
       isAnonymous: p.is_anonymous,
       authorId: p.author_id,
       authorName: p.author_name,
+      authorProfileImage: p.is_anonymous ? null : p.author_profile_image,
       likeCount: p.like_count,
       commentCount: p.comment_count,
       viewCount: p.view_count,
@@ -579,8 +581,9 @@ app.get('/api/posts/my/comments', authMiddleware, async (req, res) => {
 app.get('/api/posts/my/likes', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT p.* FROM posts p
+      `SELECT p.*, u.profile_image as author_profile_image FROM posts p
        INNER JOIN post_likes pl ON p.id = pl.post_id
+       LEFT JOIN users u ON p.author_id = u.id
        WHERE pl.user_id = $1
        ORDER BY p.created_at DESC`,
       [req.user.id]
@@ -594,6 +597,7 @@ app.get('/api/posts/my/likes', authMiddleware, async (req, res) => {
       isAnonymous: p.is_anonymous,
       authorId: p.author_id,
       authorName: p.author_name,
+      authorProfileImage: p.is_anonymous ? null : p.author_profile_image,
       likeCount: p.like_count,
       commentCount: p.comment_count,
       viewCount: p.view_count,
@@ -615,7 +619,7 @@ app.get('/api/posts/:id', authMiddleware, async (req, res) => {
     await pool.query('UPDATE posts SET view_count = view_count + 1 WHERE id = $1', [postId]);
 
     const result = await pool.query(
-      'SELECT p.*, u.name as real_author_name FROM posts p LEFT JOIN users u ON p.author_id = u.id WHERE p.id = $1',
+      'SELECT p.*, u.name as real_author_name, u.profile_image as author_profile_image FROM posts p LEFT JOIN users u ON p.author_id = u.id WHERE p.id = $1',
       [postId]
     );
     if (result.rows.length === 0) {
@@ -641,6 +645,7 @@ app.get('/api/posts/:id', authMiddleware, async (req, res) => {
       isAnonymous: p.is_anonymous,
       authorId: p.author_id,
       authorName: p.author_name,
+      authorProfileImage: p.is_anonymous ? null : p.author_profile_image,
       realAuthorName: isAdmin && p.is_anonymous ? p.real_author_name : null,
       likeCount: p.like_count,
       dislikeCount: p.dislike_count || 0,
