@@ -1410,8 +1410,11 @@ app.get('/api/jobs', authMiddleware, async (req, res) => {
   try {
     const { type, category, workType, region, sort = 'recommended', latitude, longitude, page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
-    const userLat = latitude ? parseFloat(latitude) : null;
-    const userLon = longitude ? parseFloat(longitude) : null;
+    const userLat = Number(latitude);
+    const userLon = Number(longitude);
+    const hasUserLocation = Number.isFinite(userLat) && Number.isFinite(userLon);
+
+    console.log('User location:', { latitude, longitude, userLat, userLon, hasUserLocation });
 
     let query = `
       SELECT j.*,
@@ -1505,8 +1508,12 @@ app.get('/api/jobs', authMiddleware, async (req, res) => {
     let jobs = result.rows.map(j => {
       // 거리 계산
       let distance = null;
-      if (userLat && userLon && j.latitude && j.longitude) {
-        distance = calculateDistance(userLat, userLon, parseFloat(j.latitude), parseFloat(j.longitude));
+      const jobLat = Number(j.latitude);
+      const jobLon = Number(j.longitude);
+      const hasJobLocation = Number.isFinite(jobLat) && Number.isFinite(jobLon);
+
+      if (hasUserLocation && hasJobLocation) {
+        distance = calculateDistance(userLat, userLon, jobLat, jobLon);
       }
 
       return {
@@ -1548,7 +1555,7 @@ app.get('/api/jobs', authMiddleware, async (req, res) => {
     });
 
     // 가까운순 정렬 (거리가 있는 경우)
-    if (sort === 'nearest' && userLat && userLon) {
+    if (sort === 'nearest' && hasUserLocation) {
       jobs.sort((a, b) => {
         // 프리미엄 우선
         if (a.isPremium !== b.isPremium) return b.isPremium ? 1 : -1;
