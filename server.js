@@ -421,6 +421,16 @@ async function initDB() {
       )
     `);
 
+    // Add is_completed column to pharmacies if not exists
+    await pool.query(`
+      ALTER TABLE pharmacies ADD COLUMN IF NOT EXISTS is_completed BOOLEAN DEFAULT FALSE
+    `);
+
+    // Add consulting_fee column to pharmacies if not exists
+    await pool.query(`
+      ALTER TABLE pharmacies ADD COLUMN IF NOT EXISTS consulting_fee INTEGER
+    `);
+
     // Insert default notice if none exists
     const noticeCheck = await pool.query('SELECT COUNT(*) FROM notices');
     if (parseInt(noticeCheck.rows[0].count) === 0) {
@@ -2073,6 +2083,7 @@ app.get('/api/pharmacies', authMiddleware, async (req, res) => {
         deposit: p.deposit,
         monthlyRent: p.monthly_rent,
         premium: p.premium,
+        consultingFee: p.consulting_fee,
         description: p.description,
         contactPhone: p.contact_phone,
         authorId: p.author_id,
@@ -2081,6 +2092,7 @@ app.get('/api/pharmacies', authMiddleware, async (req, res) => {
         likeCount: parseInt(p.like_count) || 0,
         isLiked: p.is_liked,
         isPremium: p.is_premium,
+        isCompleted: p.is_completed || false,
         createdAt: p.created_at,
         bumpedAt: p.bumped_at
       };
@@ -2141,6 +2153,7 @@ app.get('/api/pharmacies/:id', authMiddleware, async (req, res) => {
       deposit: p.deposit,
       monthlyRent: p.monthly_rent,
       premium: p.premium,
+      consultingFee: p.consulting_fee,
       description: p.description,
       contactPhone: p.contact_phone,
       authorId: p.author_id,
@@ -2148,6 +2161,7 @@ app.get('/api/pharmacies/:id', authMiddleware, async (req, res) => {
       viewCount: p.view_count,
       isLiked: p.is_liked,
       isPremium: p.is_premium,
+      isCompleted: p.is_completed || false,
       createdAt: p.created_at,
       bumpedAt: p.bumped_at
     });
@@ -2164,7 +2178,7 @@ app.post('/api/pharmacies', authMiddleware, async (req, res) => {
       title, transactionType, region, address, latitude, longitude,
       commercialArea, area, supplyArea, managementCost, pharmacyType,
       monthlyPrescriptionMin, monthlyPrescriptionMax, dailySales,
-      deposit, monthlyRent, premium, description, contactPhone
+      deposit, monthlyRent, premium, consultingFee, description, contactPhone
     } = req.body;
 
     const result = await pool.query(
@@ -2172,15 +2186,15 @@ app.post('/api/pharmacies', authMiddleware, async (req, res) => {
         title, transaction_type, region, address, latitude, longitude,
         commercial_area, area, supply_area, management_cost, pharmacy_type,
         monthly_prescription_min, monthly_prescription_max, daily_sales,
-        deposit, monthly_rent, premium, description, contact_phone,
+        deposit, monthly_rent, premium, consulting_fee, description, contact_phone,
         author_id, author_name
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
       RETURNING *`,
       [
         title, transactionType, region, address, latitude, longitude,
         commercialArea, area, supplyArea, managementCost, pharmacyType,
         monthlyPrescriptionMin, monthlyPrescriptionMax, dailySales,
-        deposit, monthlyRent, premium, description, contactPhone,
+        deposit, monthlyRent, premium, consultingFee, description, contactPhone,
         req.user.id, req.user.name
       ]
     );
@@ -2200,7 +2214,7 @@ app.put('/api/pharmacies/:id', authMiddleware, async (req, res) => {
       title, transactionType, region, address, latitude, longitude,
       commercialArea, area, supplyArea, managementCost, pharmacyType,
       monthlyPrescriptionMin, monthlyPrescriptionMax, dailySales,
-      deposit, monthlyRent, premium, description, contactPhone
+      deposit, monthlyRent, premium, consultingFee, description, contactPhone
     } = req.body;
 
     await pool.query(
@@ -2210,13 +2224,13 @@ app.put('/api/pharmacies/:id', authMiddleware, async (req, res) => {
         supply_area = $9, management_cost = $10, pharmacy_type = $11,
         monthly_prescription_min = $12, monthly_prescription_max = $13,
         daily_sales = $14, deposit = $15, monthly_rent = $16, premium = $17,
-        description = $18, contact_phone = $19
-      WHERE id = $20 AND author_id = $21`,
+        consulting_fee = $18, description = $19, contact_phone = $20
+      WHERE id = $21 AND author_id = $22`,
       [
         title, transactionType, region, address, latitude, longitude,
         commercialArea, area, supplyArea, managementCost, pharmacyType,
         monthlyPrescriptionMin, monthlyPrescriptionMax, dailySales,
-        deposit, monthlyRent, premium, description, contactPhone,
+        deposit, monthlyRent, premium, consultingFee, description, contactPhone,
         pharmacyId, req.user.id
       ]
     );
@@ -2271,6 +2285,28 @@ app.post('/api/pharmacies/:id/bump', authMiddleware, async (req, res) => {
     );
     res.json({ message: '매물이 끌어올려졌습니다.' });
   } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 매물 거래완료 토글
+app.post('/api/pharmacies/:id/complete', authMiddleware, async (req, res) => {
+  try {
+    const pharmacyId = parseInt(req.params.id);
+    const result = await pool.query(
+      'UPDATE pharmacies SET is_completed = NOT is_completed WHERE id = $1 AND author_id = $2 RETURNING is_completed',
+      [pharmacyId, req.user.id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: '매물을 찾을 수 없습니다.' });
+    }
+    const isCompleted = result.rows[0].is_completed;
+    res.json({
+      message: isCompleted ? '거래완료로 변경되었습니다.' : '거래가능으로 변경되었습니다.',
+      isCompleted
+    });
+  } catch (error) {
+    console.error('Toggle complete error:', error);
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
 });
