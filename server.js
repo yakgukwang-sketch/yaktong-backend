@@ -1875,19 +1875,24 @@ app.post('/api/jobs/:id/bump', authMiddleware, async (req, res) => {
   }
 });
 
-// 고용 완료
+// 고용 완료 토글
 app.post('/api/jobs/:id/complete', authMiddleware, async (req, res) => {
   try {
     const jobId = parseInt(req.params.id);
-    console.log('Complete job request:', { jobId, userId: req.user.id });
     const result = await pool.query(
-      'UPDATE jobs SET is_completed = TRUE WHERE id = $1 AND author_id = $2 RETURNING *',
+      'UPDATE jobs SET is_completed = NOT is_completed WHERE id = $1 AND author_id = $2 RETURNING is_completed',
       [jobId, req.user.id]
     );
-    console.log('Complete job result:', result.rows[0]);
-    res.json({ message: '공고가 완료 처리되었습니다.', job: result.rows[0] });
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: '공고를 찾을 수 없습니다.' });
+    }
+    const isCompleted = result.rows[0].is_completed;
+    res.json({
+      message: isCompleted ? '고용완료로 변경되었습니다.' : '구인중으로 변경되었습니다.',
+      isCompleted
+    });
   } catch (error) {
-    console.error('Complete job error:', error);
+    console.error('Toggle complete error:', error);
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
 });
