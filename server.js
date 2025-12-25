@@ -355,9 +355,14 @@ async function initDB() {
       ALTER TABLE jobs ADD COLUMN IF NOT EXISTS salary_type VARCHAR(20) DEFAULT '월급'
     `);
 
-    // Job bookmarks table
+    // Add is_completed column if not exists
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS job_bookmarks (
+      ALTER TABLE jobs ADD COLUMN IF NOT EXISTS is_completed BOOLEAN DEFAULT FALSE
+    `);
+
+    // Job likes table (관심공고용)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS job_likes (
         id SERIAL PRIMARY KEY,
         job_id INTEGER REFERENCES jobs(id) ON DELETE CASCADE,
         user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
@@ -365,6 +370,13 @@ async function initDB() {
         UNIQUE(job_id, user_id)
       )
     `);
+
+    // Migrate data from job_bookmarks to job_likes if exists
+    await pool.query(`
+      INSERT INTO job_likes (job_id, user_id, created_at)
+      SELECT job_id, user_id, created_at FROM job_bookmarks
+      ON CONFLICT (job_id, user_id) DO NOTHING
+    `).catch(() => {});
 
     // Insert default notice if none exists
     const noticeCheck = await pool.query('SELECT COUNT(*) FROM notices');
@@ -1418,8 +1430,8 @@ app.get('/api/jobs', authMiddleware, async (req, res) => {
 
     let query = `
       SELECT j.*,
-        EXISTS(SELECT 1 FROM job_bookmarks WHERE job_id = j.id AND user_id = $1) as is_bookmarked,
-        (SELECT COUNT(*) FROM job_bookmarks WHERE job_id = j.id) as bookmark_count
+        EXISTS(SELECT 1 FROM job_likes WHERE job_id = j.id AND user_id = $1) as is_liked,
+        (SELECT COUNT(*) FROM job_likes WHERE job_id = j.id) as like_count
       FROM jobs j WHERE 1=1
     `;
     const params = [req.user.id];
@@ -1491,7 +1503,7 @@ app.get('/api/jobs', authMiddleware, async (req, res) => {
         orderBy = 'COALESCE(j.bumped_at, j.created_at) DESC';
         break;
       case 'popular':
-        orderBy = 'bookmark_count DESC, j.view_count DESC';
+        orderBy = 'like_count DESC, j.view_count DESC';
         break;
       case 'latest':
         orderBy = 'j.created_at DESC';
@@ -1548,9 +1560,10 @@ app.get('/api/jobs', authMiddleware, async (req, res) => {
         authorName: j.author_name,
         viewCount: j.view_count,
         applyCount: j.apply_count,
-        bookmarkCount: parseInt(j.bookmark_count) || 0,
-        isBookmarked: j.is_bookmarked,
+        likeCount: parseInt(j.like_count) || 0,
+        isLiked: j.is_liked,
         isPremium: j.is_premium,
+        isCompleted: j.is_completed || false,
         createdAt: j.created_at,
         bumpedAt: j.bumped_at
       };
@@ -1575,15 +1588,15 @@ app.get('/api/jobs', authMiddleware, async (req, res) => {
   }
 });
 
-// 북마크한 공고 목록 (MUST be before /api/jobs/:id)
-app.get('/api/jobs/bookmarked/list', authMiddleware, async (req, res) => {
+// 좋아요한 공고 목록 (관심공고) (MUST be before /api/jobs/:id)
+app.get('/api/jobs/liked/list', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT j.*, true as is_bookmarked
+      SELECT j.*, true as is_liked
       FROM jobs j
-      INNER JOIN job_bookmarks jb ON j.id = jb.job_id
-      WHERE jb.user_id = $1
-      ORDER BY jb.created_at DESC
+      INNER JOIN job_likes jl ON j.id = jl.job_id
+      WHERE jl.user_id = $1
+      ORDER BY jl.created_at DESC
     `, [req.user.id]);
 
     const jobs = result.rows.map(j => ({
@@ -1603,8 +1616,9 @@ app.get('/api/jobs/bookmarked/list', authMiddleware, async (req, res) => {
       isAfterTax: j.is_after_tax,
       viewCount: j.view_count,
       applyCount: j.apply_count,
-      isBookmarked: true,
+      isLiked: true,
       isPremium: j.is_premium,
+      isCompleted: j.is_completed || false,
       createdAt: j.created_at,
       bumpedAt: j.bumped_at
     }));
@@ -1625,7 +1639,7 @@ app.get('/api/jobs/:id', authMiddleware, async (req, res) => {
 
     const result = await pool.query(`
       SELECT j.*,
-        EXISTS(SELECT 1 FROM job_bookmarks WHERE job_id = j.id AND user_id = $1) as is_bookmarked
+        EXISTS(SELECT 1 FROM job_likes WHERE job_id = j.id AND user_id = $1) as is_liked
       FROM jobs j WHERE j.id = $2
     `, [req.user.id, jobId]);
 
@@ -1663,8 +1677,9 @@ app.get('/api/jobs/:id', authMiddleware, async (req, res) => {
       authorName: j.author_name,
       viewCount: j.view_count,
       applyCount: j.apply_count,
-      isBookmarked: j.is_bookmarked,
+      isLiked: j.is_liked,
       isPremium: j.is_premium,
+      isCompleted: j.is_completed || false,
       createdAt: j.created_at,
       bumpedAt: j.bumped_at
     });
@@ -1771,22 +1786,22 @@ app.delete('/api/jobs/:id', authMiddleware, async (req, res) => {
   }
 });
 
-// 북마크 토글
-app.post('/api/jobs/:id/bookmark', authMiddleware, async (req, res) => {
+// 좋아요 토글 (관심공고)
+app.post('/api/jobs/:id/like', authMiddleware, async (req, res) => {
   try {
     const jobId = parseInt(req.params.id);
 
     const existing = await pool.query(
-      'SELECT id FROM job_bookmarks WHERE job_id = $1 AND user_id = $2',
+      'SELECT id FROM job_likes WHERE job_id = $1 AND user_id = $2',
       [jobId, req.user.id]
     );
 
     if (existing.rows.length > 0) {
-      await pool.query('DELETE FROM job_bookmarks WHERE job_id = $1 AND user_id = $2', [jobId, req.user.id]);
-      res.json({ bookmarked: false });
+      await pool.query('DELETE FROM job_likes WHERE job_id = $1 AND user_id = $2', [jobId, req.user.id]);
+      res.json({ liked: false });
     } else {
-      await pool.query('INSERT INTO job_bookmarks (job_id, user_id) VALUES ($1, $2)', [jobId, req.user.id]);
-      res.json({ bookmarked: true });
+      await pool.query('INSERT INTO job_likes (job_id, user_id) VALUES ($1, $2)', [jobId, req.user.id]);
+      res.json({ liked: true });
     }
   } catch (error) {
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
@@ -1803,6 +1818,23 @@ app.post('/api/jobs/:id/bump', authMiddleware, async (req, res) => {
     );
     res.json({ message: '공고가 끌어올려졌습니다.' });
   } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 고용 완료
+app.post('/api/jobs/:id/complete', authMiddleware, async (req, res) => {
+  try {
+    const jobId = parseInt(req.params.id);
+    console.log('Complete job request:', { jobId, userId: req.user.id });
+    const result = await pool.query(
+      'UPDATE jobs SET is_completed = TRUE WHERE id = $1 AND author_id = $2 RETURNING *',
+      [jobId, req.user.id]
+    );
+    console.log('Complete job result:', result.rows[0]);
+    res.json({ message: '공고가 완료 처리되었습니다.', job: result.rows[0] });
+  } catch (error) {
+    console.error('Complete job error:', error);
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
 });
