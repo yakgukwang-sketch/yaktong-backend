@@ -378,6 +378,49 @@ async function initDB() {
       ON CONFLICT (job_id, user_id) DO NOTHING
     `).catch(() => {});
 
+    // Pharmacies (약국 매물) table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS pharmacies (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        transaction_type VARCHAR(20) DEFAULT 'rent',
+        region VARCHAR(100),
+        address TEXT,
+        latitude DECIMAL(10, 8),
+        longitude DECIMAL(11, 8),
+        commercial_area VARCHAR(50),
+        area DECIMAL(10, 2),
+        supply_area DECIMAL(10, 2),
+        management_cost INTEGER,
+        pharmacy_type VARCHAR(50),
+        monthly_prescription_min INTEGER,
+        monthly_prescription_max INTEGER,
+        daily_sales INTEGER,
+        deposit INTEGER,
+        monthly_rent INTEGER,
+        premium INTEGER,
+        description TEXT,
+        contact_phone VARCHAR(50),
+        author_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        author_name VARCHAR(100),
+        view_count INTEGER DEFAULT 0,
+        is_premium BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        bumped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Pharmacy likes table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS pharmacy_likes (
+        id SERIAL PRIMARY KEY,
+        pharmacy_id INTEGER REFERENCES pharmacies(id) ON DELETE CASCADE,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(pharmacy_id, user_id)
+      )
+    `);
+
     // Insert default notice if none exists
     const noticeCheck = await pool.query('SELECT COUNT(*) FROM notices');
     if (parseInt(noticeCheck.rows[0].count) === 0) {
@@ -1908,6 +1951,325 @@ app.post('/api/admin/users/:id/admin', authMiddleware, async (req, res) => {
 
     await pool.query('UPDATE users SET is_admin = $1 WHERE id = $2', [isAdmin, userId]);
     res.json({ message: isAdmin ? '관리자로 지정되었습니다.' : '관리자 권한이 해제되었습니다.' });
+  } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// ==================== Pharmacy (매물) API ====================
+
+// 매물 목록 조회
+app.get('/api/pharmacies', authMiddleware, async (req, res) => {
+  try {
+    const { transactionType, region, commercialArea, prescriptionRange, sort, latitude, longitude, page = 1, limit = 20 } = req.query;
+    const offset = (page - 1) * limit;
+
+    const userLat = Number(latitude);
+    const userLon = Number(longitude);
+    const hasUserLocation = Number.isFinite(userLat) && Number.isFinite(userLon);
+
+    let query = `
+      SELECT p.*,
+        EXISTS(SELECT 1 FROM pharmacy_likes WHERE pharmacy_id = p.id AND user_id = $1) as is_liked,
+        (SELECT COUNT(*) FROM pharmacy_likes WHERE pharmacy_id = p.id) as like_count
+      FROM pharmacies p WHERE 1=1
+    `;
+    const params = [req.user.id];
+    let paramIndex = 2;
+
+    // 거래유형 필터
+    if (transactionType && transactionType !== 'all') {
+      query += ` AND p.transaction_type = $${paramIndex}`;
+      params.push(transactionType);
+      paramIndex++;
+    }
+
+    // 지역 필터
+    if (region && region !== 'all') {
+      query += ` AND (p.region LIKE $${paramIndex} OR p.address LIKE $${paramIndex})`;
+      params.push(`%${region}%`);
+      paramIndex++;
+    }
+
+    // 상권 필터
+    if (commercialArea && commercialArea !== 'all') {
+      query += ` AND p.commercial_area = $${paramIndex}`;
+      params.push(commercialArea);
+      paramIndex++;
+    }
+
+    // 조제수입 필터
+    if (prescriptionRange && prescriptionRange !== 'all') {
+      switch (prescriptionRange) {
+        case '500미만':
+          query += ` AND p.monthly_prescription_max < 500`;
+          break;
+        case '500~1000':
+          query += ` AND p.monthly_prescription_min >= 500 AND p.monthly_prescription_max <= 1000`;
+          break;
+        case '1000~1500':
+          query += ` AND p.monthly_prescription_min >= 1000 AND p.monthly_prescription_max <= 1500`;
+          break;
+        case '1500~2000':
+          query += ` AND p.monthly_prescription_min >= 1500 AND p.monthly_prescription_max <= 2000`;
+          break;
+        case '2000이상':
+          query += ` AND p.monthly_prescription_min >= 2000`;
+          break;
+      }
+    }
+
+    // 정렬
+    let orderBy = 'COALESCE(p.bumped_at, p.created_at) DESC';
+    switch (sort) {
+      case 'popular':
+        orderBy = 'like_count DESC, p.view_count DESC';
+        break;
+      case 'latest':
+        orderBy = 'p.created_at DESC';
+        break;
+      case 'nearest':
+        orderBy = 'COALESCE(p.bumped_at, p.created_at) DESC';
+        break;
+    }
+
+    query += ` ORDER BY p.is_premium DESC, ${orderBy} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    params.push(limit, offset);
+
+    const result = await pool.query(query, params);
+
+    const pharmacies = result.rows.map(p => {
+      let distance = null;
+      const pLat = Number(p.latitude);
+      const pLon = Number(p.longitude);
+      if (hasUserLocation && Number.isFinite(pLat) && Number.isFinite(pLon)) {
+        const R = 6371;
+        const dLat = (pLat - userLat) * Math.PI / 180;
+        const dLon = (pLon - userLon) * Math.PI / 180;
+        const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                  Math.cos(userLat * Math.PI / 180) * Math.cos(pLat * Math.PI / 180) *
+                  Math.sin(dLon/2) * Math.sin(dLon/2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        distance = Math.round(R * c * 10) / 10;
+      }
+
+      return {
+        id: p.id,
+        title: p.title,
+        transactionType: p.transaction_type,
+        region: p.region,
+        address: p.address,
+        latitude: p.latitude ? parseFloat(p.latitude) : null,
+        longitude: p.longitude ? parseFloat(p.longitude) : null,
+        distance,
+        commercialArea: p.commercial_area,
+        area: p.area ? parseFloat(p.area) : null,
+        supplyArea: p.supply_area ? parseFloat(p.supply_area) : null,
+        managementCost: p.management_cost,
+        pharmacyType: p.pharmacy_type,
+        monthlyPrescriptionMin: p.monthly_prescription_min,
+        monthlyPrescriptionMax: p.monthly_prescription_max,
+        dailySales: p.daily_sales,
+        deposit: p.deposit,
+        monthlyRent: p.monthly_rent,
+        premium: p.premium,
+        description: p.description,
+        contactPhone: p.contact_phone,
+        authorId: p.author_id,
+        authorName: p.author_name,
+        viewCount: p.view_count,
+        likeCount: parseInt(p.like_count) || 0,
+        isLiked: p.is_liked,
+        isPremium: p.is_premium,
+        createdAt: p.created_at,
+        bumpedAt: p.bumped_at
+      };
+    });
+
+    // 가까운순 정렬
+    if (sort === 'nearest' && hasUserLocation) {
+      pharmacies.sort((a, b) => {
+        if (a.isPremium !== b.isPremium) return b.isPremium ? 1 : -1;
+        if (a.distance === null) return 1;
+        if (b.distance === null) return -1;
+        return a.distance - b.distance;
+      });
+    }
+
+    res.json(pharmacies);
+  } catch (error) {
+    console.error('Get pharmacies error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 매물 상세 조회
+app.get('/api/pharmacies/:id', authMiddleware, async (req, res) => {
+  try {
+    const pharmacyId = parseInt(req.params.id);
+
+    // 조회수 증가
+    await pool.query('UPDATE pharmacies SET view_count = view_count + 1 WHERE id = $1', [pharmacyId]);
+
+    const result = await pool.query(`
+      SELECT p.*,
+        EXISTS(SELECT 1 FROM pharmacy_likes WHERE pharmacy_id = p.id AND user_id = $1) as is_liked
+      FROM pharmacies p WHERE p.id = $2
+    `, [req.user.id, pharmacyId]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: '매물을 찾을 수 없습니다.' });
+    }
+
+    const p = result.rows[0];
+    res.json({
+      id: p.id,
+      title: p.title,
+      transactionType: p.transaction_type,
+      region: p.region,
+      address: p.address,
+      latitude: p.latitude ? parseFloat(p.latitude) : null,
+      longitude: p.longitude ? parseFloat(p.longitude) : null,
+      commercialArea: p.commercial_area,
+      area: p.area ? parseFloat(p.area) : null,
+      supplyArea: p.supply_area ? parseFloat(p.supply_area) : null,
+      managementCost: p.management_cost,
+      pharmacyType: p.pharmacy_type,
+      monthlyPrescriptionMin: p.monthly_prescription_min,
+      monthlyPrescriptionMax: p.monthly_prescription_max,
+      dailySales: p.daily_sales,
+      deposit: p.deposit,
+      monthlyRent: p.monthly_rent,
+      premium: p.premium,
+      description: p.description,
+      contactPhone: p.contact_phone,
+      authorId: p.author_id,
+      authorName: p.author_name,
+      viewCount: p.view_count,
+      isLiked: p.is_liked,
+      isPremium: p.is_premium,
+      createdAt: p.created_at,
+      bumpedAt: p.bumped_at
+    });
+  } catch (error) {
+    console.error('Get pharmacy error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 매물 등록
+app.post('/api/pharmacies', authMiddleware, async (req, res) => {
+  try {
+    const {
+      title, transactionType, region, address, latitude, longitude,
+      commercialArea, area, supplyArea, managementCost, pharmacyType,
+      monthlyPrescriptionMin, monthlyPrescriptionMax, dailySales,
+      deposit, monthlyRent, premium, description, contactPhone
+    } = req.body;
+
+    const result = await pool.query(
+      `INSERT INTO pharmacies (
+        title, transaction_type, region, address, latitude, longitude,
+        commercial_area, area, supply_area, management_cost, pharmacy_type,
+        monthly_prescription_min, monthly_prescription_max, daily_sales,
+        deposit, monthly_rent, premium, description, contact_phone,
+        author_id, author_name
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+      RETURNING *`,
+      [
+        title, transactionType, region, address, latitude, longitude,
+        commercialArea, area, supplyArea, managementCost, pharmacyType,
+        monthlyPrescriptionMin, monthlyPrescriptionMax, dailySales,
+        deposit, monthlyRent, premium, description, contactPhone,
+        req.user.id, req.user.name
+      ]
+    );
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Create pharmacy error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 매물 수정
+app.put('/api/pharmacies/:id', authMiddleware, async (req, res) => {
+  try {
+    const pharmacyId = parseInt(req.params.id);
+    const {
+      title, transactionType, region, address, latitude, longitude,
+      commercialArea, area, supplyArea, managementCost, pharmacyType,
+      monthlyPrescriptionMin, monthlyPrescriptionMax, dailySales,
+      deposit, monthlyRent, premium, description, contactPhone
+    } = req.body;
+
+    await pool.query(
+      `UPDATE pharmacies SET
+        title = $1, transaction_type = $2, region = $3, address = $4,
+        latitude = $5, longitude = $6, commercial_area = $7, area = $8,
+        supply_area = $9, management_cost = $10, pharmacy_type = $11,
+        monthly_prescription_min = $12, monthly_prescription_max = $13,
+        daily_sales = $14, deposit = $15, monthly_rent = $16, premium = $17,
+        description = $18, contact_phone = $19
+      WHERE id = $20 AND author_id = $21`,
+      [
+        title, transactionType, region, address, latitude, longitude,
+        commercialArea, area, supplyArea, managementCost, pharmacyType,
+        monthlyPrescriptionMin, monthlyPrescriptionMax, dailySales,
+        deposit, monthlyRent, premium, description, contactPhone,
+        pharmacyId, req.user.id
+      ]
+    );
+
+    res.json({ message: '매물이 수정되었습니다.' });
+  } catch (error) {
+    console.error('Update pharmacy error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 매물 삭제
+app.delete('/api/pharmacies/:id', authMiddleware, async (req, res) => {
+  try {
+    const pharmacyId = parseInt(req.params.id);
+    await pool.query('DELETE FROM pharmacies WHERE id = $1 AND author_id = $2', [pharmacyId, req.user.id]);
+    res.json({ message: '매물이 삭제되었습니다.' });
+  } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 매물 좋아요 토글
+app.post('/api/pharmacies/:id/like', authMiddleware, async (req, res) => {
+  try {
+    const pharmacyId = parseInt(req.params.id);
+
+    const existing = await pool.query(
+      'SELECT id FROM pharmacy_likes WHERE pharmacy_id = $1 AND user_id = $2',
+      [pharmacyId, req.user.id]
+    );
+
+    if (existing.rows.length > 0) {
+      await pool.query('DELETE FROM pharmacy_likes WHERE pharmacy_id = $1 AND user_id = $2', [pharmacyId, req.user.id]);
+      res.json({ liked: false });
+    } else {
+      await pool.query('INSERT INTO pharmacy_likes (pharmacy_id, user_id) VALUES ($1, $2)', [pharmacyId, req.user.id]);
+      res.json({ liked: true });
+    }
+  } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 매물 끌어올리기
+app.post('/api/pharmacies/:id/bump', authMiddleware, async (req, res) => {
+  try {
+    const pharmacyId = parseInt(req.params.id);
+    await pool.query(
+      'UPDATE pharmacies SET bumped_at = NOW() WHERE id = $1 AND author_id = $2',
+      [pharmacyId, req.user.id]
+    );
+    res.json({ message: '매물이 끌어올려졌습니다.' });
   } catch (error) {
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
