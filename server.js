@@ -1180,11 +1180,6 @@ app.post('/api/ai/chat', authMiddleware, async (req, res) => {
       config: {
         temperature: 0.3,
         systemInstruction: AI_SYSTEM_PROMPT,
-        tools: [{
-          fileSearch: {
-            fileSearchStoreNames: [ABS_STORE, REL_STORE]
-          }
-        }],
       },
     });
 
