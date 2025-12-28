@@ -157,7 +157,8 @@ function extractText(result) {
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 // Initialize database tables
 async function initDB() {
@@ -205,12 +206,23 @@ async function initDB() {
         is_anonymous BOOLEAN DEFAULT FALSE,
         author_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
         author_name VARCHAR(100),
+        images TEXT,
         like_count INTEGER DEFAULT 0,
+        dislike_count INTEGER DEFAULT 0,
         comment_count INTEGER DEFAULT 0,
         view_count INTEGER DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    // Add images column if not exists (for existing databases)
+    await pool.query(`
+      ALTER TABLE posts ADD COLUMN IF NOT EXISTS images TEXT
+    `).catch(() => {});
+
+    await pool.query(`
+      ALTER TABLE posts ADD COLUMN IF NOT EXISTS dislike_count INTEGER DEFAULT 0
+    `).catch(() => {});
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS post_likes (
