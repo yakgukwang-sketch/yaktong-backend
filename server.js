@@ -431,6 +431,49 @@ async function initDB() {
       ALTER TABLE pharmacies ADD COLUMN IF NOT EXISTS consulting_fee INTEGER
     `);
 
+    // ==================== Reputation System Tables ====================
+
+    // Add user_type column to users (general, pharmacist, pharmacy_owner)
+    await pool.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS user_type VARCHAR(20) DEFAULT 'general'
+    `);
+
+    // Add reputation_score column to users
+    await pool.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS reputation_score INTEGER DEFAULT 0
+    `);
+
+    // Add license_status column to users (none, pending, approved, rejected)
+    await pool.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS license_status VARCHAR(20) DEFAULT 'none'
+    `);
+
+    // License verifications table (약사면허증/약국개설등록증 인증 요청)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS license_verifications (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        request_type VARCHAR(20) NOT NULL,
+        license_image TEXT NOT NULL,
+        status VARCHAR(20) DEFAULT 'pending',
+        rejection_reason TEXT,
+        reviewer_id INTEGER REFERENCES users(id),
+        submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        reviewed_at TIMESTAMP
+      )
+    `);
+
+    // Reputation votes table (인기도 투표)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS reputation_votes (
+        id SERIAL PRIMARY KEY,
+        voter_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        target_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        vote_type INTEGER NOT NULL CHECK (vote_type IN (1, -1)),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     // Insert default notice if none exists
     const noticeCheck = await pool.query('SELECT COUNT(*) FROM notices');
     if (parseInt(noticeCheck.rows[0].count) === 0) {
@@ -502,6 +545,9 @@ app.post('/api/auth/register', async (req, res) => {
         phone: user.phone,
         profileImage: user.profile_image,
         isAdmin: user.is_admin,
+        userType: user.user_type || 'general',
+        reputationScore: user.reputation_score || 0,
+        licenseStatus: user.license_status || 'none',
         createdAt: user.created_at
       }
     });
@@ -537,11 +583,45 @@ app.post('/api/auth/login', async (req, res) => {
         phone: user.phone,
         profileImage: user.profile_image,
         isAdmin: user.is_admin,
+        userType: user.user_type || 'general',
+        reputationScore: user.reputation_score || 0,
+        licenseStatus: user.license_status || 'none',
         createdAt: user.created_at
       }
     });
   } catch (error) {
     console.error('Login error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 현재 사용자 정보 조회
+app.get('/api/auth/me', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT id, email, name, is_admin, profile_image, phone, user_type, reputation_score, license_status, created_at FROM users WHERE id = $1',
+      [req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: '사용자를 찾을 수 없습니다.' });
+    }
+
+    const user = result.rows[0];
+    res.json({
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      isAdmin: user.is_admin,
+      profileImage: user.profile_image,
+      phone: user.phone,
+      userType: user.user_type || 'general',
+      reputationScore: user.reputation_score || 0,
+      licenseStatus: user.license_status || 'none',
+      createdAt: user.created_at
+    });
+  } catch (error) {
+    console.error('Get me error:', error);
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
 });
@@ -616,6 +696,377 @@ app.post('/api/auth/delete-account', authMiddleware, async (req, res) => {
     await pool.query('DELETE FROM users WHERE id = $1', [req.user.id]);
     res.json({ message: '계정이 삭제되었습니다.' });
   } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// ==================== License Verification API ====================
+
+// 자격증 제출 (약사면허증 또는 약국개설등록증)
+app.post('/api/auth/submit-license', authMiddleware, async (req, res) => {
+  try {
+    const { licenseType, licenseImage } = req.body;
+
+    if (!['pharmacist', 'pharmacy_owner'].includes(licenseType)) {
+      return res.status(400).json({ message: '올바른 자격 유형을 선택해주세요.' });
+    }
+
+    if (!licenseImage) {
+      return res.status(400).json({ message: '자격증 이미지를 업로드해주세요.' });
+    }
+
+    // 이미 승인된 경우 체크
+    if (req.user.user_type !== 'general') {
+      return res.status(400).json({ message: '이미 자격이 인증되었습니다.' });
+    }
+
+    // 대기 중인 요청이 있는지 체크
+    const pendingCheck = await pool.query(
+      'SELECT id FROM license_verifications WHERE user_id = $1 AND status = $2',
+      [req.user.id, 'pending']
+    );
+    if (pendingCheck.rows.length > 0) {
+      return res.status(400).json({ message: '이미 심사 대기 중인 요청이 있습니다.' });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO license_verifications (user_id, request_type, license_image)
+       VALUES ($1, $2, $3) RETURNING id`,
+      [req.user.id, licenseType, licenseImage]
+    );
+
+    // users 테이블 상태 업데이트
+    await pool.query(
+      `UPDATE users SET license_status = 'pending' WHERE id = $1`,
+      [req.user.id]
+    );
+
+    res.json({
+      message: '자격 인증 요청이 제출되었습니다.',
+      requestId: result.rows[0].id,
+      status: 'pending'
+    });
+  } catch (error) {
+    console.error('Submit license error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 내 자격 인증 상태 조회
+app.get('/api/auth/license-status', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT lv.*, u.user_type, u.license_status
+       FROM users u
+       LEFT JOIN license_verifications lv ON u.id = lv.user_id
+       WHERE u.id = $1
+       ORDER BY lv.submitted_at DESC LIMIT 1`,
+      [req.user.id]
+    );
+
+    const row = result.rows[0];
+    res.json({
+      userType: row?.user_type || 'general',
+      licenseStatus: row?.license_status || 'none',
+      lastRequest: row?.id ? {
+        id: row.id,
+        type: row.request_type,
+        status: row.status,
+        rejectionReason: row.rejection_reason,
+        submittedAt: row.submitted_at,
+        reviewedAt: row.reviewed_at
+      } : null
+    });
+  } catch (error) {
+    console.error('License status error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 관리자: 승인 대기 목록 조회
+app.get('/api/admin/license-requests', authMiddleware, async (req, res) => {
+  try {
+    if (!req.user.is_admin) {
+      return res.status(403).json({ message: '권한이 없습니다.' });
+    }
+
+    const { status = 'pending' } = req.query;
+
+    const result = await pool.query(
+      `SELECT lv.*, u.name, u.email, u.profile_image
+       FROM license_verifications lv
+       JOIN users u ON lv.user_id = u.id
+       WHERE lv.status = $1
+       ORDER BY lv.submitted_at ASC`,
+      [status]
+    );
+
+    res.json(result.rows.map(r => ({
+      id: r.id,
+      userId: r.user_id,
+      userName: r.name,
+      userEmail: r.email,
+      userProfileImage: r.profile_image,
+      requestType: r.request_type,
+      licenseImage: r.license_image,
+      status: r.status,
+      submittedAt: r.submitted_at
+    })));
+  } catch (error) {
+    console.error('Get license requests error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 관리자: 대기 목록 개수 조회
+app.get('/api/admin/license-requests/count', authMiddleware, async (req, res) => {
+  try {
+    if (!req.user.is_admin) {
+      return res.status(403).json({ message: '권한이 없습니다.' });
+    }
+
+    const result = await pool.query(
+      `SELECT COUNT(*) FROM license_verifications WHERE status = 'pending'`
+    );
+
+    res.json({ count: parseInt(result.rows[0].count) });
+  } catch (error) {
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 관리자: 자격 승인
+app.post('/api/admin/license-requests/:id/approve', authMiddleware, async (req, res) => {
+  try {
+    if (!req.user.is_admin) {
+      return res.status(403).json({ message: '권한이 없습니다.' });
+    }
+
+    const requestId = parseInt(req.params.id);
+
+    // 요청 정보 조회
+    const requestResult = await pool.query(
+      'SELECT * FROM license_verifications WHERE id = $1',
+      [requestId]
+    );
+
+    if (requestResult.rows.length === 0) {
+      return res.status(404).json({ message: '요청을 찾을 수 없습니다.' });
+    }
+
+    const request = requestResult.rows[0];
+    if (request.status !== 'pending') {
+      return res.status(400).json({ message: '이미 처리된 요청입니다.' });
+    }
+
+    const newUserType = request.request_type;
+
+    // 요청 상태 업데이트
+    await pool.query(
+      `UPDATE license_verifications
+       SET status = 'approved', reviewer_id = $1, reviewed_at = NOW()
+       WHERE id = $2`,
+      [req.user.id, requestId]
+    );
+
+    // 사용자 유형 업데이트
+    await pool.query(
+      `UPDATE users SET user_type = $1, license_status = 'approved' WHERE id = $2`,
+      [newUserType, request.user_id]
+    );
+
+    res.json({ message: '승인되었습니다.' });
+  } catch (error) {
+    console.error('Approve license error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 관리자: 자격 거부
+app.post('/api/admin/license-requests/:id/reject', authMiddleware, async (req, res) => {
+  try {
+    if (!req.user.is_admin) {
+      return res.status(403).json({ message: '권한이 없습니다.' });
+    }
+
+    const requestId = parseInt(req.params.id);
+    const { reason } = req.body;
+
+    const requestResult = await pool.query(
+      'SELECT * FROM license_verifications WHERE id = $1',
+      [requestId]
+    );
+
+    if (requestResult.rows.length === 0) {
+      return res.status(404).json({ message: '요청을 찾을 수 없습니다.' });
+    }
+
+    const request = requestResult.rows[0];
+    if (request.status !== 'pending') {
+      return res.status(400).json({ message: '이미 처리된 요청입니다.' });
+    }
+
+    await pool.query(
+      `UPDATE license_verifications
+       SET status = 'rejected', rejection_reason = $1, reviewer_id = $2, reviewed_at = NOW()
+       WHERE id = $3`,
+      [reason || '요청이 거부되었습니다.', req.user.id, requestId]
+    );
+
+    await pool.query(
+      `UPDATE users SET license_status = 'rejected' WHERE id = $1`,
+      [request.user_id]
+    );
+
+    res.json({ message: '거부되었습니다.' });
+  } catch (error) {
+    console.error('Reject license error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// ==================== Reputation API ====================
+
+// 인기도 투표
+app.post('/api/reputation/vote', authMiddleware, async (req, res) => {
+  try {
+    const { targetId, voteType } = req.body;
+
+    // 약사/개국약사만 투표 가능
+    if (!['pharmacist', 'pharmacy_owner'].includes(req.user.user_type)) {
+      return res.status(403).json({ message: '약사 또는 개국약사만 투표할 수 있습니다.' });
+    }
+
+    // voteType 검증
+    if (![1, -1].includes(voteType)) {
+      return res.status(400).json({ message: '올바른 투표 유형을 선택해주세요.' });
+    }
+
+    // 대상 사용자 조회
+    const targetUser = await pool.query(
+      'SELECT user_type FROM users WHERE id = $1',
+      [targetId]
+    );
+
+    if (targetUser.rows.length === 0) {
+      return res.status(404).json({ message: '사용자를 찾을 수 없습니다.' });
+    }
+
+    // 대상도 약사/개국약사여야 함
+    if (!['pharmacist', 'pharmacy_owner'].includes(targetUser.rows[0].user_type)) {
+      return res.status(400).json({ message: '약사 또는 개국약사에게만 투표할 수 있습니다.' });
+    }
+
+    // 자기 자신에게 투표 불가
+    if (req.user.id === targetId) {
+      return res.status(400).json({ message: '자신에게는 투표할 수 없습니다.' });
+    }
+
+    // 오늘 이미 투표했는지 확인 (하루에 1명에게만)
+    const todayVote = await pool.query(
+      `SELECT id FROM reputation_votes
+       WHERE voter_id = $1 AND DATE(created_at) = CURRENT_DATE`,
+      [req.user.id]
+    );
+
+    if (todayVote.rows.length > 0) {
+      return res.status(400).json({ message: '오늘은 이미 다른 사용자에게 투표하셨습니다.' });
+    }
+
+    // 30일 내 동일인에게 투표했는지 확인
+    const recentVote = await pool.query(
+      `SELECT id FROM reputation_votes
+       WHERE voter_id = $1 AND target_id = $2
+       AND created_at > NOW() - INTERVAL '30 days'`,
+      [req.user.id, targetId]
+    );
+
+    if (recentVote.rows.length > 0) {
+      return res.status(400).json({ message: '같은 사용자에게는 30일에 1번만 투표할 수 있습니다.' });
+    }
+
+    // 투표 기록
+    await pool.query(
+      'INSERT INTO reputation_votes (voter_id, target_id, vote_type) VALUES ($1, $2, $3)',
+      [req.user.id, targetId, voteType]
+    );
+
+    // 대상 사용자 점수 업데이트
+    await pool.query(
+      'UPDATE users SET reputation_score = reputation_score + $1 WHERE id = $2',
+      [voteType, targetId]
+    );
+
+    const newScore = await pool.query(
+      'SELECT reputation_score FROM users WHERE id = $1',
+      [targetId]
+    );
+
+    res.json({
+      message: '투표가 완료되었습니다.',
+      targetNewScore: newScore.rows[0].reputation_score
+    });
+  } catch (error) {
+    console.error('Reputation vote error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 투표 가능 여부 확인
+app.get('/api/reputation/can-vote/:targetId', authMiddleware, async (req, res) => {
+  try {
+    const targetId = parseInt(req.params.targetId);
+
+    // 본인인지 확인
+    if (req.user.id === targetId) {
+      return res.json({ canVote: false, reason: 'self' });
+    }
+
+    // 투표자가 약사/개국약사인지 확인
+    if (!['pharmacist', 'pharmacy_owner'].includes(req.user.user_type)) {
+      return res.json({ canVote: false, reason: 'not_pharmacist' });
+    }
+
+    // 대상이 약사/개국약사인지 확인
+    const targetUser = await pool.query(
+      'SELECT user_type FROM users WHERE id = $1',
+      [targetId]
+    );
+
+    if (targetUser.rows.length === 0) {
+      return res.json({ canVote: false, reason: 'user_not_found' });
+    }
+
+    if (!['pharmacist', 'pharmacy_owner'].includes(targetUser.rows[0].user_type)) {
+      return res.json({ canVote: false, reason: 'target_not_pharmacist' });
+    }
+
+    // 오늘 이미 투표했는지 확인
+    const todayVote = await pool.query(
+      `SELECT id FROM reputation_votes
+       WHERE voter_id = $1 AND DATE(created_at) = CURRENT_DATE`,
+      [req.user.id]
+    );
+
+    if (todayVote.rows.length > 0) {
+      return res.json({ canVote: false, reason: 'daily_limit' });
+    }
+
+    // 30일 내 동일인에게 투표했는지 확인
+    const recentVote = await pool.query(
+      `SELECT id FROM reputation_votes
+       WHERE voter_id = $1 AND target_id = $2
+       AND created_at > NOW() - INTERVAL '30 days'`,
+      [req.user.id, targetId]
+    );
+
+    if (recentVote.rows.length > 0) {
+      return res.json({ canVote: false, reason: 'monthly_limit' });
+    }
+
+    res.json({ canVote: true });
+  } catch (error) {
+    console.error('Can vote check error:', error);
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
 });
@@ -1180,6 +1631,11 @@ app.post('/api/ai/chat', authMiddleware, async (req, res) => {
       config: {
         temperature: 0.3,
         systemInstruction: AI_SYSTEM_PROMPT,
+        tools: [{
+          fileSearch: {
+            fileSearchStoreNames: [ABS_STORE, REL_STORE]
+          }
+        }],
       },
     });
 
@@ -1687,8 +2143,13 @@ app.get('/api/jobs/:id', authMiddleware, async (req, res) => {
 
     const result = await pool.query(`
       SELECT j.*,
-        EXISTS(SELECT 1 FROM job_likes WHERE job_id = j.id AND user_id = $1) as is_liked
-      FROM jobs j WHERE j.id = $2
+        EXISTS(SELECT 1 FROM job_likes WHERE job_id = j.id AND user_id = $1) as is_liked,
+        u.user_type as author_user_type,
+        u.reputation_score as author_reputation_score,
+        u.profile_image as author_profile_image
+      FROM jobs j
+      LEFT JOIN users u ON j.author_id = u.id
+      WHERE j.id = $2
     `, [req.user.id, jobId]);
 
     if (result.rows.length === 0) {
@@ -1723,6 +2184,9 @@ app.get('/api/jobs/:id', authMiddleware, async (req, res) => {
       contactPhone: j.contact_phone,
       authorId: j.author_id,
       authorName: j.author_name,
+      authorUserType: j.author_user_type || 'general',
+      authorReputationScore: j.author_reputation_score || 0,
+      authorProfileImage: j.author_profile_image,
       viewCount: j.view_count,
       applyCount: j.apply_count,
       isLiked: j.is_liked,
@@ -2125,8 +2589,13 @@ app.get('/api/pharmacies/:id', authMiddleware, async (req, res) => {
 
     const result = await pool.query(`
       SELECT p.*,
-        EXISTS(SELECT 1 FROM pharmacy_likes WHERE pharmacy_id = p.id AND user_id = $1) as is_liked
-      FROM pharmacies p WHERE p.id = $2
+        EXISTS(SELECT 1 FROM pharmacy_likes WHERE pharmacy_id = p.id AND user_id = $1) as is_liked,
+        u.user_type as author_user_type,
+        u.reputation_score as author_reputation_score,
+        u.profile_image as author_profile_image
+      FROM pharmacies p
+      LEFT JOIN users u ON p.author_id = u.id
+      WHERE p.id = $2
     `, [req.user.id, pharmacyId]);
 
     if (result.rows.length === 0) {
@@ -2158,6 +2627,9 @@ app.get('/api/pharmacies/:id', authMiddleware, async (req, res) => {
       contactPhone: p.contact_phone,
       authorId: p.author_id,
       authorName: p.author_name,
+      authorUserType: p.author_user_type || 'general',
+      authorReputationScore: p.author_reputation_score || 0,
+      authorProfileImage: p.author_profile_image,
       viewCount: p.view_count,
       isLiked: p.is_liked,
       isPremium: p.is_premium,
