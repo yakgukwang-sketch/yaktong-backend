@@ -1091,7 +1091,7 @@ app.get('/api/posts', authMiddleware, async (req, res) => {
     const offset = (page - 1) * limit;
     const isAdmin = req.user.is_admin;
 
-    let query = 'SELECT p.*, u.name as real_author_name, u.profile_image as author_profile_image FROM posts p LEFT JOIN users u ON p.author_id = u.id';
+    let query = 'SELECT p.*, u.name as real_author_name, u.profile_image as author_profile_image, u.user_type as author_user_type, u.reputation_score as author_reputation_score FROM posts p LEFT JOIN users u ON p.author_id = u.id';
     let params = [];
 
     if (category && category !== 'all') {
@@ -1113,6 +1113,8 @@ app.get('/api/posts', authMiddleware, async (req, res) => {
       authorId: p.author_id,
       authorName: p.author_name,
       authorProfileImage: p.is_anonymous ? null : p.author_profile_image,
+      authorUserType: p.is_anonymous ? null : p.author_user_type,
+      authorReputationScore: p.is_anonymous ? null : p.author_reputation_score,
       realAuthorName: isAdmin && p.is_anonymous ? p.real_author_name : null,
       likeCount: p.like_count,
       commentCount: p.comment_count,
@@ -1249,7 +1251,7 @@ app.get('/api/posts/:id', authMiddleware, async (req, res) => {
     await pool.query('UPDATE posts SET view_count = view_count + 1 WHERE id = $1', [postId]);
 
     const result = await pool.query(
-      'SELECT p.*, u.name as real_author_name, u.profile_image as author_profile_image FROM posts p LEFT JOIN users u ON p.author_id = u.id WHERE p.id = $1',
+      'SELECT p.*, u.name as real_author_name, u.profile_image as author_profile_image, u.user_type as author_user_type, u.reputation_score as author_reputation_score FROM posts p LEFT JOIN users u ON p.author_id = u.id WHERE p.id = $1',
       [postId]
     );
     if (result.rows.length === 0) {
@@ -1276,6 +1278,8 @@ app.get('/api/posts/:id', authMiddleware, async (req, res) => {
       authorId: p.author_id,
       authorName: p.author_name,
       authorProfileImage: p.is_anonymous ? null : p.author_profile_image,
+      authorUserType: p.is_anonymous ? null : p.author_user_type,
+      authorReputationScore: p.is_anonymous ? null : p.author_reputation_score,
       realAuthorName: isAdmin && p.is_anonymous ? p.real_author_name : null,
       likeCount: p.like_count,
       dislikeCount: p.dislike_count || 0,
