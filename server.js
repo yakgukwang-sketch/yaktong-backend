@@ -486,6 +486,17 @@ async function initDB() {
       )
     `);
 
+    // Blocked users table (사용자 차단)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS blocked_users (
+        id SERIAL PRIMARY KEY,
+        blocker_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        blocked_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(blocker_id, blocked_id)
+      )
+    `);
+
     // Insert default notice if none exists
     const noticeCheck = await pool.query('SELECT COUNT(*) FROM notices');
     if (parseInt(noticeCheck.rows[0].count) === 0) {
@@ -2481,6 +2492,104 @@ app.get('/api/users/:id/profile', authMiddleware, async (req, res) => {
     });
   } catch (error) {
     console.error('Get user profile error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 사용자 차단
+app.post('/api/users/:id/block', authMiddleware, async (req, res) => {
+  try {
+    const blockedId = parseInt(req.params.id);
+    const blockerId = req.user.id;
+
+    if (blockedId === blockerId) {
+      return res.status(400).json({ message: '자신을 차단할 수 없습니다.' });
+    }
+
+    // 이미 차단했는지 확인
+    const existing = await pool.query(
+      'SELECT id FROM blocked_users WHERE blocker_id = $1 AND blocked_id = $2',
+      [blockerId, blockedId]
+    );
+
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ message: '이미 차단한 사용자입니다.' });
+    }
+
+    await pool.query(
+      'INSERT INTO blocked_users (blocker_id, blocked_id) VALUES ($1, $2)',
+      [blockerId, blockedId]
+    );
+
+    res.json({ message: '사용자를 차단했습니다.', blocked: true });
+  } catch (error) {
+    console.error('Block user error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 사용자 차단 해제
+app.delete('/api/users/:id/block', authMiddleware, async (req, res) => {
+  try {
+    const blockedId = parseInt(req.params.id);
+    const blockerId = req.user.id;
+
+    const result = await pool.query(
+      'DELETE FROM blocked_users WHERE blocker_id = $1 AND blocked_id = $2 RETURNING id',
+      [blockerId, blockedId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: '차단한 사용자가 아닙니다.' });
+    }
+
+    res.json({ message: '차단이 해제되었습니다.', blocked: false });
+  } catch (error) {
+    console.error('Unblock user error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 차단한 사용자 목록 조회
+app.get('/api/users/blocked', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT u.id, u.name, u.profile_image, u.user_type, u.reputation_score, bu.created_at as blocked_at
+       FROM blocked_users bu
+       JOIN users u ON bu.blocked_id = u.id
+       WHERE bu.blocker_id = $1
+       ORDER BY bu.created_at DESC`,
+      [req.user.id]
+    );
+
+    const blockedUsers = result.rows.map(u => ({
+      id: u.id,
+      name: u.name,
+      profileImage: u.profile_image,
+      userType: u.user_type,
+      reputationScore: u.reputation_score,
+      blockedAt: u.blocked_at
+    }));
+
+    res.json(blockedUsers);
+  } catch (error) {
+    console.error('Get blocked users error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 특정 사용자 차단 여부 확인
+app.get('/api/users/:id/blocked', authMiddleware, async (req, res) => {
+  try {
+    const blockedId = parseInt(req.params.id);
+    const result = await pool.query(
+      'SELECT id FROM blocked_users WHERE blocker_id = $1 AND blocked_id = $2',
+      [req.user.id, blockedId]
+    );
+
+    res.json({ blocked: result.rows.length > 0 });
+  } catch (error) {
+    console.error('Check blocked error:', error);
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
 });
