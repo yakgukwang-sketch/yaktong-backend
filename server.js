@@ -1308,6 +1308,7 @@ app.get('/api/posts/:id', authMiddleware, async (req, res) => {
       authorUserType: p.is_anonymous ? null : p.author_user_type,
       authorReputationScore: p.is_anonymous ? null : p.author_reputation_score,
       realAuthorName: isAdmin && p.is_anonymous ? p.real_author_name : null,
+      images: p.images ? JSON.parse(p.images) : [],
       likeCount: p.like_count,
       dislikeCount: p.dislike_count || 0,
       commentCount: p.comment_count,
