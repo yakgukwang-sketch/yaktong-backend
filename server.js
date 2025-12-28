@@ -2372,6 +2372,119 @@ app.post('/api/jobs/:id/complete', authMiddleware, async (req, res) => {
   }
 });
 
+// ==================== User Profile API ====================
+
+// 사용자 프로필 조회
+app.get('/api/users/:id/profile', authMiddleware, async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id);
+
+    // 사용자 기본 정보 조회
+    const userResult = await pool.query(
+      `SELECT id, name, email, profile_image, user_type, reputation_score, created_at
+       FROM users WHERE id = $1`,
+      [userId]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ message: '사용자를 찾을 수 없습니다.' });
+    }
+
+    const user = userResult.rows[0];
+
+    // 사용자의 게시글 조회수 합계
+    const viewsResult = await pool.query(
+      `SELECT COALESCE(SUM(view_count), 0) as total_views FROM posts WHERE author_id = $1`,
+      [userId]
+    );
+
+    // 사용자의 게시글 수 (익명 제외)
+    const postCountResult = await pool.query(
+      `SELECT COUNT(*) as post_count FROM posts WHERE author_id = $1 AND is_anonymous = false`,
+      [userId]
+    );
+
+    // 사용자의 댓글 수
+    const commentCountResult = await pool.query(
+      `SELECT COUNT(*) as comment_count FROM comments WHERE author_id = $1`,
+      [userId]
+    );
+
+    // 사용자가 받은 공감 수 (게시글 좋아요 + 댓글 좋아요)
+    const likesResult = await pool.query(
+      `SELECT
+        (SELECT COALESCE(SUM(like_count), 0) FROM posts WHERE author_id = $1) +
+        (SELECT COALESCE(SUM(like_count), 0) FROM comments WHERE author_id = $1) as total_likes`,
+      [userId]
+    );
+
+    // 사용자의 게시글 목록 (최근 20개, 익명 제외)
+    const postsResult = await pool.query(
+      `SELECT id, title, content, category, view_count, like_count, comment_count, created_at
+       FROM posts WHERE author_id = $1 AND is_anonymous = false
+       ORDER BY created_at DESC LIMIT 20`,
+      [userId]
+    );
+
+    // 사용자가 댓글 단 게시글 목록 (최근 20개)
+    const commentedPostsResult = await pool.query(
+      `SELECT DISTINCT ON (p.id) p.id, p.title, p.content, p.category, p.view_count, p.like_count, p.comment_count, p.created_at,
+              c.content as my_comment, c.created_at as comment_created_at
+       FROM posts p
+       INNER JOIN comments c ON p.id = c.post_id
+       WHERE c.author_id = $1
+       ORDER BY p.id, c.created_at DESC
+       LIMIT 20`,
+      [userId]
+    );
+
+    res.json({
+      user: {
+        id: user.id,
+        name: user.name,
+        profileImage: user.profile_image,
+        userType: user.user_type || 'general',
+        reputationScore: user.reputation_score || 0,
+        createdAt: user.created_at
+      },
+      stats: {
+        totalViews: parseInt(viewsResult.rows[0].total_views) || 0,
+        postCount: parseInt(postCountResult.rows[0].post_count) + parseInt(commentCountResult.rows[0].comment_count) || 0,
+        receivedLikes: parseInt(likesResult.rows[0].total_likes) || 0,
+        // 증가량은 별도 테이블이 필요하므로 일단 0으로 설정
+        viewsGrowth: 0,
+        postGrowth: 0,
+        likesGrowth: 0
+      },
+      posts: postsResult.rows.map(p => ({
+        id: p.id,
+        title: p.title,
+        content: p.content,
+        category: p.category,
+        viewCount: p.view_count,
+        likeCount: p.like_count,
+        commentCount: p.comment_count,
+        createdAt: p.created_at
+      })),
+      commentedPosts: commentedPostsResult.rows.map(p => ({
+        id: p.id,
+        title: p.title,
+        content: p.content,
+        category: p.category,
+        viewCount: p.view_count,
+        likeCount: p.like_count,
+        commentCount: p.comment_count,
+        createdAt: p.created_at,
+        myComment: p.my_comment,
+        commentCreatedAt: p.comment_created_at
+      }))
+    });
+  } catch (error) {
+    console.error('Get user profile error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
 // ==================== Admin API ====================
 
 app.get('/api/admin/users', authMiddleware, async (req, res) => {
