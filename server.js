@@ -898,6 +898,14 @@ app.post('/api/admin/license-requests/:id/approve', authMiddleware, async (req, 
       [newUserType, request.user_id]
     );
 
+    // 알림 생성
+    const userTypeName = newUserType === 'pharmacist' ? '약사' : '개국약사';
+    await pool.query(
+      `INSERT INTO notifications (user_id, type, title, message)
+       VALUES ($1, 'license_approved', '자격 인증 완료', $2)`,
+      [request.user_id, `축하합니다! ${userTypeName} 자격이 인증되었습니다.`]
+    );
+
     res.json({ message: '승인되었습니다.' });
   } catch (error) {
     console.error('Approve license error:', error);
@@ -939,6 +947,14 @@ app.post('/api/admin/license-requests/:id/reject', authMiddleware, async (req, r
     await pool.query(
       `UPDATE users SET license_status = 'rejected' WHERE id = $1`,
       [request.user_id]
+    );
+
+    // 알림 생성
+    const rejectMessage = reason || '제출하신 서류를 확인해주세요.';
+    await pool.query(
+      `INSERT INTO notifications (user_id, type, title, message)
+       VALUES ($1, 'license_rejected', '자격 인증 반려', $2)`,
+      [request.user_id, `자격 인증이 반려되었습니다. 사유: ${rejectMessage}`]
     );
 
     res.json({ message: '거부되었습니다.' });
