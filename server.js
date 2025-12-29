@@ -3124,7 +3124,22 @@ app.post('/api/prescription/parse', authMiddleware, upload.single('file'), async
     }
 
     const imageBase64 = req.file.buffer.toString('base64');
-    const mimeType = req.file.mimetype || 'image/jpeg';
+
+    // 이미지 타입 감지 (매직 바이트 사용)
+    const buffer = req.file.buffer;
+    let mimeType = 'image/jpeg'; // 기본값
+
+    if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) {
+      mimeType = 'image/jpeg';
+    } else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
+      mimeType = 'image/png';
+    } else if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46) {
+      mimeType = 'image/gif';
+    } else if (buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46) {
+      mimeType = 'image/webp';
+    }
+
+    console.log('Detected mimeType:', mimeType, 'Original:', req.file.mimetype);
 
     // Gemini 2.0 Flash로 OCR
     const result = await ai.models.generateContent({
