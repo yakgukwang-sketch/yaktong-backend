@@ -6,6 +6,13 @@ const bcrypt = require('bcryptjs');
 const { Pool } = require('pg');
 const { GoogleGenAI } = require('@google/genai');
 const nodemailer = require('nodemailer');
+const multer = require('multer');
+
+// Multer 설정 (메모리 저장)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB
+});
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1968,7 +1975,7 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
 // 구인구직 목록 조회
 app.get('/api/jobs', authMiddleware, async (req, res) => {
   try {
-    const { type, category, workType, region, sort = 'recommended', latitude, longitude, page = 1, limit = 20 } = req.query;
+    const { type, category, workType, region, sort = 'recommended', salaryType, salaryMin, salaryMax, latitude, longitude, page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
     const userLat = Number(latitude);
     const userLon = Number(longitude);
@@ -2043,7 +2050,32 @@ app.get('/api/jobs', authMiddleware, async (req, res) => {
       }
     }
 
-    // 정렬 옵션: recommended(추천순), nearest(가까운순), popular(인기도순), latest(최신순)
+    // 급여 유형 필터 (시급/월급)
+    if (salaryType && salaryType !== 'all') {
+      query += ` AND j.salary_type = $${paramIndex}`;
+      params.push(salaryType);
+      paramIndex++;
+    }
+
+    // 급여 범위 필터
+    if (salaryMin) {
+      const minValue = Number(salaryMin);
+      if (Number.isFinite(minValue)) {
+        query += ` AND COALESCE(j.salary_max, j.salary_min) >= $${paramIndex}`;
+        params.push(minValue);
+        paramIndex++;
+      }
+    }
+    if (salaryMax) {
+      const maxValue = Number(salaryMax);
+      if (Number.isFinite(maxValue)) {
+        query += ` AND COALESCE(j.salary_min, j.salary_max) <= $${paramIndex}`;
+        params.push(maxValue);
+        paramIndex++;
+      }
+    }
+
+    // 정렬 옵션: recommended(추천순), nearest(가까운순), popular(인기도순), latest(최신순), salaryDesc(높은급여순)
     let orderBy;
     switch (sort) {
       case 'nearest':
@@ -2055,6 +2087,10 @@ app.get('/api/jobs', authMiddleware, async (req, res) => {
         break;
       case 'latest':
         orderBy = 'j.created_at DESC';
+        break;
+      case 'salaryDesc':
+        // 높은급여순: salary_max가 있으면 salary_max, 없으면 salary_min 기준 내림차순
+        orderBy = 'COALESCE(j.salary_max, j.salary_min, 0) DESC';
         break;
       case 'recommended':
       default:
@@ -3035,6 +3071,171 @@ app.post('/api/pharmacies/:id/complete', authMiddleware, async (req, res) => {
   } catch (error) {
     console.error('Toggle complete error:', error);
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// ==================== Prescription API ====================
+
+// 처방전 OCR 파싱 프롬프트
+const PRESCRIPTION_PARSE_PROMPT = `처방전 이미지에서 환자 정보와 약품 정보를 추출해 JSON으로 반환하세요.
+
+반환 형식:
+{
+  "gender": "M" 또는 "F",
+  "age": 나이 (숫자),
+  "medications": [
+    {
+      "drug_name": "약품명 (용량 포함)",
+      "single_dose": "1회 복용량",
+      "frequency": 하루 복용 횟수 (숫자),
+      "duration": 투약 일수 (숫자)
+    }
+  ]
+}
+
+규칙:
+- 성별: 남/남자/M → "M", 여/여자/F → "F"
+- 읽을 수 없는 필드는 null
+- JSON만 반환, 다른 텍스트 없이`;
+
+// 처방전 분석 프롬프트
+const PRESCRIPTION_ANALYZE_PROMPT = `당신은 전문 약사입니다. 다음 처방전 정보를 분석해주세요.
+
+## 환자 정보
+- 성별: {gender}
+- 나이: {age}세
+
+## 처방 약품
+{medications}
+
+## 분석 요청
+1. 각 약품의 효능/효과 설명
+2. 복용 시 주의사항
+3. 약품 간 상호작용 확인
+4. 환자 상태(나이, 성별)를 고려한 복약지도
+
+간결하고 실용적으로 답변해주세요.`;
+
+// POST /api/prescription/parse - 처방전 OCR
+app.post('/api/prescription/parse', authMiddleware, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ parse_success: false, error: '이미지 파일이 필요합니다.' });
+    }
+
+    const imageBase64 = req.file.buffer.toString('base64');
+    const mimeType = req.file.mimetype || 'image/jpeg';
+
+    // Gemini 2.0 Flash로 OCR
+    const result = await ai.models.generateContent({
+      model: 'gemini-2.0-flash',
+      contents: [{
+        role: 'user',
+        parts: [
+          { text: PRESCRIPTION_PARSE_PROMPT },
+          {
+            inlineData: {
+              mimeType: mimeType,
+              data: imageBase64
+            }
+          }
+        ]
+      }],
+      config: {
+        temperature: 0.1,
+      }
+    });
+
+    const responseText = result?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    console.log('Gemini OCR response:', responseText);
+
+    // JSON 추출
+    let parsed;
+    try {
+      // JSON 블록 추출 시도
+      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        parsed = JSON.parse(jsonMatch[0]);
+      } else {
+        throw new Error('No JSON found');
+      }
+    } catch (e) {
+      console.error('JSON parse error:', e);
+      return res.json({
+        parse_success: false,
+        gender: null,
+        age: null,
+        medications: []
+      });
+    }
+
+    res.json({
+      parse_success: true,
+      gender: parsed.gender || null,
+      age: parsed.age || null,
+      medications: (parsed.medications || []).map(m => ({
+        drug_name: m.drug_name || '',
+        single_dose: m.single_dose || '1정',
+        frequency: m.frequency || 1,
+        duration: m.duration || 1
+      }))
+    });
+
+  } catch (error) {
+    console.error('Prescription parse error:', error);
+    res.status(500).json({
+      parse_success: false,
+      error: '처방전 분석 중 오류가 발생했습니다.'
+    });
+  }
+});
+
+// POST /api/prescription/analyze - 처방전 분석
+app.post('/api/prescription/analyze', authMiddleware, async (req, res) => {
+  try {
+    const { gender, age, medications } = req.body;
+
+    if (!medications || medications.length === 0) {
+      return res.status(400).json({ error: '약품 정보가 필요합니다.' });
+    }
+
+    // 약품 목록 포맷팅
+    const medicationList = medications.map((m, i) =>
+      `${i + 1}. ${m.drug_name} - ${m.single_dose} x ${m.frequency}회/일 x ${m.duration}일`
+    ).join('\n');
+
+    // 프롬프트 생성
+    const prompt = PRESCRIPTION_ANALYZE_PROMPT
+      .replace('{gender}', gender === 'M' ? '남성' : '여성')
+      .replace('{age}', age || '미상')
+      .replace('{medications}', medicationList);
+
+    // Gemini로 분석 (기존 AI 시스템 활용)
+    const result = await generateWithRetry({
+      model: 'gemini-2.5-flash',
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: {
+        temperature: 0.3,
+        systemInstruction: AI_SYSTEM_PROMPT,
+        tools: [{
+          fileSearch: {
+            fileSearchStoreNames: [ABS_STORE, REL_STORE]
+          }
+        }],
+      },
+    });
+
+    const analysisText = extractText(result);
+
+    if (!analysisText) {
+      return res.status(500).json({ error: '분석 결과를 생성하지 못했습니다.' });
+    }
+
+    res.json({ analysis: analysisText });
+
+  } catch (error) {
+    console.error('Prescription analyze error:', error);
+    res.status(500).json({ error: '분석 중 오류가 발생했습니다.' });
   }
 });
 
