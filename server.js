@@ -3225,22 +3225,17 @@ app.post('/api/prescription/analyze', authMiddleware, async (req, res) => {
       .replace('{age}', age || '미상')
       .replace('{medications}', medicationList);
 
-    // Gemini로 분석 (기존 AI 시스템 활용)
-    const result = await generateWithRetry({
-      model: 'gemini-2.5-flash',
+    // Gemini로 분석 (RAG 없이 빠른 분석)
+    const result = await ai.models.generateContent({
+      model: 'gemini-2.0-flash',
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       config: {
         temperature: 0.3,
-        systemInstruction: AI_SYSTEM_PROMPT,
-        tools: [{
-          fileSearch: {
-            fileSearchStoreNames: [ABS_STORE, REL_STORE]
-          }
-        }],
+        systemInstruction: `당신은 전문 약사입니다. 처방전을 검토하고 약물 상호작용, 부작용, 복용법에 대해 정확하게 분석해주세요.`,
       },
     });
 
-    const analysisText = extractText(result);
+    const analysisText = result?.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
     if (!analysisText) {
       return res.status(500).json({ error: '분석 결과를 생성하지 못했습니다.' });
