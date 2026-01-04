@@ -504,6 +504,46 @@ async function initDB() {
       )
     `);
 
+    // Meetings table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS meetings (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        description TEXT,
+        image_base64 TEXT,
+        category VARCHAR(50) NOT NULL,
+        status VARCHAR(20) DEFAULT 'recruiting',
+        location VARCHAR(255) NOT NULL,
+        member_count INTEGER DEFAULT 1,
+        max_members INTEGER DEFAULT 100,
+        author_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Meeting members table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS meeting_members (
+        id SERIAL PRIMARY KEY,
+        meeting_id INTEGER REFERENCES meetings(id) ON DELETE CASCADE,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        is_host BOOLEAN DEFAULT FALSE,
+        joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(meeting_id, user_id)
+      )
+    `);
+
+    // Meeting likes table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS meeting_likes (
+        id SERIAL PRIMARY KEY,
+        meeting_id INTEGER REFERENCES meetings(id) ON DELETE CASCADE,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(meeting_id, user_id)
+      )
+    `);
+
     // Insert default notice if none exists
     const noticeCheck = await pool.query('SELECT COUNT(*) FROM notices');
     if (parseInt(noticeCheck.rows[0].count) === 0) {
@@ -3070,6 +3110,210 @@ app.post('/api/pharmacies/:id/complete', authMiddleware, async (req, res) => {
     });
   } catch (error) {
     console.error('Toggle complete error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// ==================== Meetings API ====================
+
+// Get all meetings
+app.get('/api/meetings', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT m.*, u.name as author_name,
+        EXISTS(SELECT 1 FROM meeting_members mm WHERE mm.meeting_id = m.id AND mm.user_id = $1) as is_joined,
+        EXISTS(SELECT 1 FROM meeting_likes ml WHERE ml.meeting_id = m.id AND ml.user_id = $1) as is_liked
+      FROM meetings m
+      LEFT JOIN users u ON m.author_id = u.id
+      ORDER BY m.created_at DESC
+    `, [req.user.id]);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Get meetings error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// Get single meeting
+app.get('/api/meetings/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(`
+      SELECT m.*, u.name as author_name,
+        EXISTS(SELECT 1 FROM meeting_members mm WHERE mm.meeting_id = m.id AND mm.user_id = $1) as is_joined,
+        EXISTS(SELECT 1 FROM meeting_likes ml WHERE ml.meeting_id = m.id AND ml.user_id = $1) as is_liked
+      FROM meetings m
+      LEFT JOIN users u ON m.author_id = u.id
+      WHERE m.id = $2
+    `, [req.user.id, id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: '모임을 찾을 수 없습니다.' });
+    }
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Get meeting error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// Create meeting
+app.post('/api/meetings', authMiddleware, async (req, res) => {
+  try {
+    const { title, description, category, location, image_base64 } = req.body;
+
+    const result = await pool.query(
+      `INSERT INTO meetings (title, description, category, location, image_base64, author_id)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [title, description || '', category, location, image_base64, req.user.id]
+    );
+
+    const meetingId = result.rows[0].id;
+
+    // Add creator as host member
+    await pool.query(
+      `INSERT INTO meeting_members (meeting_id, user_id, is_host) VALUES ($1, $2, TRUE)`,
+      [meetingId, req.user.id]
+    );
+
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('Create meeting error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// Update meeting
+app.put('/api/meetings/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, description, category, location, image_base64, status } = req.body;
+
+    const result = await pool.query(
+      `UPDATE meetings
+       SET title = COALESCE($1, title),
+           description = COALESCE($2, description),
+           category = COALESCE($3, category),
+           location = COALESCE($4, location),
+           image_base64 = COALESCE($5, image_base64),
+           status = COALESCE($6, status)
+       WHERE id = $7 AND author_id = $8 RETURNING *`,
+      [title, description, category, location, image_base64, status, id, req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: '모임을 찾을 수 없거나 수정 권한이 없습니다.' });
+    }
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Update meeting error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// Delete meeting
+app.delete('/api/meetings/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      'DELETE FROM meetings WHERE id = $1 AND author_id = $2 RETURNING id',
+      [id, req.user.id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: '모임을 찾을 수 없거나 삭제 권한이 없습니다.' });
+    }
+    res.json({ message: '모임이 삭제되었습니다.' });
+  } catch (error) {
+    console.error('Delete meeting error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// Join meeting
+app.post('/api/meetings/:id/join', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Check if already joined
+    const existing = await pool.query(
+      'SELECT id FROM meeting_members WHERE meeting_id = $1 AND user_id = $2',
+      [id, req.user.id]
+    );
+
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ message: '이미 가입한 모임입니다.' });
+    }
+
+    await pool.query(
+      'INSERT INTO meeting_members (meeting_id, user_id) VALUES ($1, $2)',
+      [id, req.user.id]
+    );
+
+    // Update member count
+    await pool.query(
+      'UPDATE meetings SET member_count = member_count + 1 WHERE id = $1',
+      [id]
+    );
+
+    res.json({ message: '모임에 가입했습니다.' });
+  } catch (error) {
+    console.error('Join meeting error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// Leave meeting
+app.post('/api/meetings/:id/leave', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      'DELETE FROM meeting_members WHERE meeting_id = $1 AND user_id = $2 AND is_host = FALSE RETURNING id',
+      [id, req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({ message: '모임장은 탈퇴할 수 없습니다.' });
+    }
+
+    // Update member count
+    await pool.query(
+      'UPDATE meetings SET member_count = GREATEST(member_count - 1, 1) WHERE id = $1',
+      [id]
+    );
+
+    res.json({ message: '모임을 탈퇴했습니다.' });
+  } catch (error) {
+    console.error('Leave meeting error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// Toggle meeting like
+app.post('/api/meetings/:id/like', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const existing = await pool.query(
+      'SELECT id FROM meeting_likes WHERE meeting_id = $1 AND user_id = $2',
+      [id, req.user.id]
+    );
+
+    if (existing.rows.length > 0) {
+      await pool.query(
+        'DELETE FROM meeting_likes WHERE meeting_id = $1 AND user_id = $2',
+        [id, req.user.id]
+      );
+      res.json({ liked: false });
+    } else {
+      await pool.query(
+        'INSERT INTO meeting_likes (meeting_id, user_id) VALUES ($1, $2)',
+        [id, req.user.id]
+      );
+      res.json({ liked: true });
+    }
+  } catch (error) {
+    console.error('Toggle meeting like error:', error);
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
 });
