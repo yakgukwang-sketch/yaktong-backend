@@ -544,6 +544,18 @@ async function initDB() {
       )
     `);
 
+    // Meeting messages table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS meeting_messages (
+        id SERIAL PRIMARY KEY,
+        meeting_id INTEGER REFERENCES meetings(id) ON DELETE CASCADE,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        content TEXT NOT NULL,
+        message_type VARCHAR(20) DEFAULT 'user',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     // Insert default notice if none exists
     const noticeCheck = await pool.query('SELECT COUNT(*) FROM notices');
     if (parseInt(noticeCheck.rows[0].count) === 0) {
@@ -3334,6 +3346,93 @@ app.get('/api/meetings/:id/members', authMiddleware, async (req, res) => {
     res.json(result.rows);
   } catch (error) {
     console.error('Get meeting members error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// Get meeting messages
+app.get('/api/meetings/:id/messages', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { before, limit = 50 } = req.query;
+
+    // Check if user is a member of the meeting
+    const memberCheck = await pool.query(
+      'SELECT id FROM meeting_members WHERE meeting_id = $1 AND user_id = $2',
+      [id, req.user.id]
+    );
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ message: '모임 멤버만 채팅을 볼 수 있습니다.' });
+    }
+
+    let query = `
+      SELECT mm.id, mm.content, mm.message_type, mm.created_at,
+             u.id as user_id, u.name as user_name, u.profile_image
+      FROM meeting_messages mm
+      JOIN users u ON mm.user_id = u.id
+      WHERE mm.meeting_id = $1
+    `;
+    const params = [id];
+
+    if (before) {
+      query += ` AND mm.id < $2`;
+      params.push(before);
+    }
+
+    query += ` ORDER BY mm.created_at DESC LIMIT $${params.length + 1}`;
+    params.push(parseInt(limit));
+
+    const result = await pool.query(query, params);
+
+    // Return in chronological order (oldest first)
+    res.json(result.rows.reverse());
+  } catch (error) {
+    console.error('Get meeting messages error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// Send meeting message
+app.post('/api/meetings/:id/messages', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { content, messageType = 'user' } = req.body;
+
+    if (!content || content.trim() === '') {
+      return res.status(400).json({ message: '메시지 내용이 필요합니다.' });
+    }
+
+    // Check if user is a member of the meeting
+    const memberCheck = await pool.query(
+      'SELECT id FROM meeting_members WHERE meeting_id = $1 AND user_id = $2',
+      [id, req.user.id]
+    );
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ message: '모임 멤버만 채팅을 보낼 수 있습니다.' });
+    }
+
+    const result = await pool.query(`
+      INSERT INTO meeting_messages (meeting_id, user_id, content, message_type)
+      VALUES ($1, $2, $3, $4)
+      RETURNING id, content, message_type, created_at
+    `, [id, req.user.id, content.trim(), messageType]);
+
+    // Get user info for response
+    const userResult = await pool.query(
+      'SELECT id, name, profile_image FROM users WHERE id = $1',
+      [req.user.id]
+    );
+
+    const message = {
+      ...result.rows[0],
+      user_id: req.user.id,
+      user_name: userResult.rows[0].name,
+      profile_image: userResult.rows[0].profile_image,
+    };
+
+    res.status(201).json(message);
+  } catch (error) {
+    console.error('Send meeting message error:', error);
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
 });
