@@ -528,9 +528,20 @@ async function initDB() {
         meeting_id INTEGER REFERENCES meetings(id) ON DELETE CASCADE,
         user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
         is_host BOOLEAN DEFAULT FALSE,
+        status VARCHAR(20) DEFAULT 'approved',
         joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(meeting_id, user_id)
       )
+    `);
+
+    // Add status column if not exists (migration)
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='meeting_members' AND column_name='status') THEN
+          ALTER TABLE meeting_members ADD COLUMN status VARCHAR(20) DEFAULT 'approved';
+        END IF;
+      END $$;
     `);
 
     // Meeting likes table
@@ -3303,25 +3314,98 @@ app.delete('/api/meetings/:id', authMiddleware, async (req, res) => {
   }
 });
 
-// Join meeting
+// Join meeting (request to join - pending approval)
 app.post('/api/meetings/:id/join', authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Check if already joined
+    // Check if already joined or pending
     const existing = await pool.query(
-      'SELECT id FROM meeting_members WHERE meeting_id = $1 AND user_id = $2',
+      'SELECT id, status FROM meeting_members WHERE meeting_id = $1 AND user_id = $2',
       [id, req.user.id]
     );
 
     if (existing.rows.length > 0) {
-      return res.status(400).json({ message: '이미 가입한 모임입니다.' });
+      const status = existing.rows[0].status;
+      if (status === 'approved') {
+        return res.status(400).json({ message: '이미 가입한 모임입니다.' });
+      } else if (status === 'pending') {
+        return res.status(400).json({ message: '가입 승인 대기 중입니다.' });
+      } else if (status === 'rejected') {
+        // Allow re-request after rejection
+        await pool.query(
+          'UPDATE meeting_members SET status = $1 WHERE meeting_id = $2 AND user_id = $3',
+          ['pending', id, req.user.id]
+        );
+        return res.json({ message: '가입 신청이 완료되었습니다. 모임장의 승인을 기다려주세요.' });
+      }
     }
 
+    // Insert as pending
     await pool.query(
-      'INSERT INTO meeting_members (meeting_id, user_id) VALUES ($1, $2)',
+      'INSERT INTO meeting_members (meeting_id, user_id, status) VALUES ($1, $2, $3)',
+      [id, req.user.id, 'pending']
+    );
+
+    res.json({ message: '가입 신청이 완료되었습니다. 모임장의 승인을 기다려주세요.' });
+  } catch (error) {
+    console.error('Join meeting error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// Get pending join requests (host only)
+app.get('/api/meetings/:id/requests', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Check if user is host
+    const hostCheck = await pool.query(
+      'SELECT id FROM meeting_members WHERE meeting_id = $1 AND user_id = $2 AND is_host = true',
       [id, req.user.id]
     );
+    if (hostCheck.rows.length === 0) {
+      return res.status(403).json({ message: '모임장만 가입 신청을 확인할 수 있습니다.' });
+    }
+
+    const result = await pool.query(`
+      SELECT mm.*, u.name, u.profile_image, u.email
+      FROM meeting_members mm
+      JOIN users u ON mm.user_id = u.id
+      WHERE mm.meeting_id = $1 AND mm.status = 'pending'
+      ORDER BY mm.joined_at DESC
+    `, [id]);
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Get join requests error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// Approve join request (host only)
+app.post('/api/meetings/:id/approve/:userId', authMiddleware, async (req, res) => {
+  try {
+    const { id, userId } = req.params;
+
+    // Check if user is host
+    const hostCheck = await pool.query(
+      'SELECT id FROM meeting_members WHERE meeting_id = $1 AND user_id = $2 AND is_host = true',
+      [id, req.user.id]
+    );
+    if (hostCheck.rows.length === 0) {
+      return res.status(403).json({ message: '모임장만 가입을 승인할 수 있습니다.' });
+    }
+
+    // Update status to approved
+    const result = await pool.query(
+      'UPDATE meeting_members SET status = $1, joined_at = NOW() WHERE meeting_id = $2 AND user_id = $3 AND status = $4 RETURNING id',
+      ['approved', id, userId, 'pending']
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: '가입 신청을 찾을 수 없습니다.' });
+    }
 
     // Update member count
     await pool.query(
@@ -3329,9 +3413,82 @@ app.post('/api/meetings/:id/join', authMiddleware, async (req, res) => {
       [id]
     );
 
-    res.json({ message: '모임에 가입했습니다.' });
+    res.json({ message: '가입을 승인했습니다.' });
   } catch (error) {
-    console.error('Join meeting error:', error);
+    console.error('Approve member error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// Reject join request (host only)
+app.post('/api/meetings/:id/reject/:userId', authMiddleware, async (req, res) => {
+  try {
+    const { id, userId } = req.params;
+
+    // Check if user is host
+    const hostCheck = await pool.query(
+      'SELECT id FROM meeting_members WHERE meeting_id = $1 AND user_id = $2 AND is_host = true',
+      [id, req.user.id]
+    );
+    if (hostCheck.rows.length === 0) {
+      return res.status(403).json({ message: '모임장만 가입을 거절할 수 있습니다.' });
+    }
+
+    // Update status to rejected
+    const result = await pool.query(
+      'UPDATE meeting_members SET status = $1 WHERE meeting_id = $2 AND user_id = $3 AND status = $4 RETURNING id',
+      ['rejected', id, userId, 'pending']
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: '가입 신청을 찾을 수 없습니다.' });
+    }
+
+    res.json({ message: '가입을 거절했습니다.' });
+  } catch (error) {
+    console.error('Reject member error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// Kick member (host only)
+app.delete('/api/meetings/:id/kick/:userId', authMiddleware, async (req, res) => {
+  try {
+    const { id, userId } = req.params;
+
+    // Check if user is host
+    const hostCheck = await pool.query(
+      'SELECT id FROM meeting_members WHERE meeting_id = $1 AND user_id = $2 AND is_host = true',
+      [id, req.user.id]
+    );
+    if (hostCheck.rows.length === 0) {
+      return res.status(403).json({ message: '모임장만 멤버를 강퇴할 수 있습니다.' });
+    }
+
+    // Cannot kick yourself (host)
+    if (parseInt(userId) === req.user.id) {
+      return res.status(400).json({ message: '자기 자신은 강퇴할 수 없습니다.' });
+    }
+
+    // Delete member
+    const result = await pool.query(
+      'DELETE FROM meeting_members WHERE meeting_id = $1 AND user_id = $2 AND status = $3 RETURNING id',
+      [id, userId, 'approved']
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: '멤버를 찾을 수 없습니다.' });
+    }
+
+    // Update member count
+    await pool.query(
+      'UPDATE meetings SET member_count = member_count - 1 WHERE id = $1',
+      [id]
+    );
+
+    res.json({ message: '멤버를 강퇴했습니다.' });
+  } catch (error) {
+    console.error('Kick member error:', error);
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
 });
@@ -3392,16 +3549,16 @@ app.post('/api/meetings/:id/like', authMiddleware, async (req, res) => {
   }
 });
 
-// Get meeting members
+// Get meeting members (approved only)
 app.get('/api/meetings/:id/members', authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
 
     const result = await pool.query(`
-      SELECT u.id, u.name, u.profile_image, mm.is_host, mm.joined_at
+      SELECT u.id, u.name, u.profile_image, mm.is_host, mm.joined_at, mm.status
       FROM meeting_members mm
       JOIN users u ON mm.user_id = u.id
-      WHERE mm.meeting_id = $1
+      WHERE mm.meeting_id = $1 AND (mm.status = 'approved' OR mm.status IS NULL)
       ORDER BY mm.is_host DESC, mm.joined_at ASC
     `, [id]);
 
