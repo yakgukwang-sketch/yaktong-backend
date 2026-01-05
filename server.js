@@ -3318,6 +3318,26 @@ app.post('/api/meetings/:id/like', authMiddleware, async (req, res) => {
   }
 });
 
+// Get meeting members
+app.get('/api/meetings/:id/members', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(`
+      SELECT u.id, u.name, u.profile_image, mm.is_host, mm.joined_at
+      FROM meeting_members mm
+      JOIN users u ON mm.user_id = u.id
+      WHERE mm.meeting_id = $1
+      ORDER BY mm.is_host DESC, mm.joined_at ASC
+    `, [id]);
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Get meeting members error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
 // ==================== Prescription API ====================
 
 // 처방전 OCR 파싱 프롬프트
