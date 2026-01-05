@@ -629,6 +629,38 @@ async function initDB() {
       )
     `);
 
+    // UsedItems (중고거래) table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS used_items (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        description TEXT,
+        price INTEGER NOT NULL DEFAULT 0,
+        is_negotiable BOOLEAN DEFAULT FALSE,
+        images TEXT[],
+        category VARCHAR(50) NOT NULL,
+        condition VARCHAR(50) NOT NULL,
+        status VARCHAR(20) DEFAULT 'available',
+        location VARCHAR(100),
+        author_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        view_count INTEGER DEFAULT 0,
+        chat_count INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        bumped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // UsedItem likes table (관심상품용)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS used_item_likes (
+        id SERIAL PRIMARY KEY,
+        item_id INTEGER REFERENCES used_items(id) ON DELETE CASCADE,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(item_id, user_id)
+      )
+    `);
+
     // Insert default notice if none exists
     const noticeCheck = await pool.query('SELECT COUNT(*) FROM notices');
     if (parseInt(noticeCheck.rows[0].count) === 0) {
@@ -4168,6 +4200,431 @@ app.post('/api/prescription/analyze', authMiddleware, async (req, res) => {
   } catch (error) {
     console.error('Prescription analyze error:', error);
     res.status(500).json({ error: '분석 중 오류가 발생했습니다.' });
+  }
+});
+
+// ==================== UsedItem (중고거래) API ====================
+
+// 중고거래 목록 조회
+app.get('/api/used-items', authMiddleware, async (req, res) => {
+  try {
+    const { category, status, sort = 'latest', search, page = 1, limit = 20 } = req.query;
+    const offset = (page - 1) * limit;
+
+    let query = `
+      SELECT ui.*,
+        u.name as author_name,
+        u.profile_image as author_profile_image,
+        u.user_type as author_user_type,
+        u.reputation_score as author_reputation_score,
+        EXISTS(SELECT 1 FROM used_item_likes WHERE item_id = ui.id AND user_id = $1) as is_liked,
+        (SELECT COUNT(*) FROM used_item_likes WHERE item_id = ui.id) as like_count
+      FROM used_items ui
+      LEFT JOIN users u ON ui.author_id = u.id
+      WHERE 1=1
+    `;
+    const params = [req.user.id];
+    let paramIndex = 2;
+
+    if (category && category !== 'all') {
+      query += ` AND ui.category = $${paramIndex}`;
+      params.push(category);
+      paramIndex++;
+    }
+
+    if (status && status !== 'all') {
+      query += ` AND ui.status = $${paramIndex}`;
+      params.push(status);
+      paramIndex++;
+    }
+
+    if (search && search.trim()) {
+      query += ` AND (ui.title ILIKE $${paramIndex} OR ui.description ILIKE $${paramIndex})`;
+      params.push(`%${search.trim()}%`);
+      paramIndex++;
+    }
+
+    // 정렬
+    let orderBy;
+    switch (sort) {
+      case 'priceLow':
+        orderBy = 'ui.price ASC';
+        break;
+      case 'priceHigh':
+        orderBy = 'ui.price DESC';
+        break;
+      case 'latest':
+      default:
+        orderBy = 'COALESCE(ui.bumped_at, ui.created_at) DESC';
+        break;
+    }
+    query += ` ORDER BY ${orderBy} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    params.push(limit, offset);
+
+    const result = await pool.query(query, params);
+
+    const items = result.rows.map(item => ({
+      id: item.id,
+      title: item.title,
+      description: item.description,
+      price: item.price,
+      isNegotiable: item.is_negotiable,
+      images: item.images || [],
+      category: item.category,
+      condition: item.condition,
+      status: item.status,
+      location: item.location,
+      authorId: item.author_id,
+      authorName: item.author_name,
+      authorProfileImage: item.author_profile_image,
+      authorUserType: item.author_user_type,
+      authorReputationScore: item.author_reputation_score,
+      viewCount: item.view_count,
+      chatCount: item.chat_count,
+      likeCount: parseInt(item.like_count) || 0,
+      isLiked: item.is_liked,
+      createdAt: item.created_at,
+      bumpedAt: item.bumped_at
+    }));
+
+    res.json(items);
+  } catch (error) {
+    console.error('Get used items error:', error);
+    res.status(500).json({ message: '상품 목록을 불러오는데 실패했습니다.' });
+  }
+});
+
+// 중고거래 상세 조회
+app.get('/api/used-items/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // 조회수 증가
+    await pool.query('UPDATE used_items SET view_count = view_count + 1 WHERE id = $1', [id]);
+
+    const result = await pool.query(`
+      SELECT ui.*,
+        u.name as author_name,
+        u.profile_image as author_profile_image,
+        u.user_type as author_user_type,
+        u.reputation_score as author_reputation_score,
+        EXISTS(SELECT 1 FROM used_item_likes WHERE item_id = ui.id AND user_id = $1) as is_liked,
+        (SELECT COUNT(*) FROM used_item_likes WHERE item_id = ui.id) as like_count
+      FROM used_items ui
+      LEFT JOIN users u ON ui.author_id = u.id
+      WHERE ui.id = $2
+    `, [req.user.id, id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: '상품을 찾을 수 없습니다.' });
+    }
+
+    const item = result.rows[0];
+    res.json({
+      id: item.id,
+      title: item.title,
+      description: item.description,
+      price: item.price,
+      isNegotiable: item.is_negotiable,
+      images: item.images || [],
+      category: item.category,
+      condition: item.condition,
+      status: item.status,
+      location: item.location,
+      authorId: item.author_id,
+      authorName: item.author_name,
+      authorProfileImage: item.author_profile_image,
+      authorUserType: item.author_user_type,
+      authorReputationScore: item.author_reputation_score,
+      viewCount: item.view_count,
+      chatCount: item.chat_count,
+      likeCount: parseInt(item.like_count) || 0,
+      isLiked: item.is_liked,
+      createdAt: item.created_at,
+      bumpedAt: item.bumped_at
+    });
+  } catch (error) {
+    console.error('Get used item error:', error);
+    res.status(500).json({ message: '상품을 불러오는데 실패했습니다.' });
+  }
+});
+
+// 중고거래 등록
+app.post('/api/used-items', authMiddleware, async (req, res) => {
+  try {
+    const { title, description, price, category, condition, location, isNegotiable, images } = req.body;
+
+    if (!title || !category || !condition) {
+      return res.status(400).json({ message: '필수 항목을 입력해주세요.' });
+    }
+
+    const result = await pool.query(`
+      INSERT INTO used_items (title, description, price, is_negotiable, images, category, condition, location, author_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING *
+    `, [title, description || '', price || 0, isNegotiable || false, images || [], category, condition, location || '', req.user.id]);
+
+    const item = result.rows[0];
+    res.status(201).json({
+      id: item.id,
+      title: item.title,
+      description: item.description,
+      price: item.price,
+      isNegotiable: item.is_negotiable,
+      images: item.images || [],
+      category: item.category,
+      condition: item.condition,
+      status: item.status,
+      location: item.location,
+      authorId: item.author_id,
+      authorName: req.user.name,
+      authorProfileImage: req.user.profile_image,
+      authorUserType: req.user.user_type,
+      authorReputationScore: req.user.reputation_score,
+      viewCount: item.view_count,
+      chatCount: item.chat_count,
+      likeCount: 0,
+      isLiked: false,
+      createdAt: item.created_at,
+      bumpedAt: item.bumped_at
+    });
+  } catch (error) {
+    console.error('Create used item error:', error);
+    res.status(500).json({ message: '상품 등록에 실패했습니다.' });
+  }
+});
+
+// 중고거래 수정
+app.put('/api/used-items/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, description, price, category, condition, location, isNegotiable, images } = req.body;
+
+    // 권한 확인
+    const checkResult = await pool.query('SELECT author_id FROM used_items WHERE id = $1', [id]);
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({ message: '상품을 찾을 수 없습니다.' });
+    }
+    if (checkResult.rows[0].author_id !== req.user.id) {
+      return res.status(403).json({ message: '수정 권한이 없습니다.' });
+    }
+
+    const result = await pool.query(`
+      UPDATE used_items
+      SET title = COALESCE($1, title),
+          description = COALESCE($2, description),
+          price = COALESCE($3, price),
+          category = COALESCE($4, category),
+          condition = COALESCE($5, condition),
+          location = COALESCE($6, location),
+          is_negotiable = COALESCE($7, is_negotiable),
+          images = COALESCE($8, images)
+      WHERE id = $9
+      RETURNING *
+    `, [title, description, price, category, condition, location, isNegotiable, images, id]);
+
+    const item = result.rows[0];
+    res.json({
+      id: item.id,
+      title: item.title,
+      description: item.description,
+      price: item.price,
+      isNegotiable: item.is_negotiable,
+      images: item.images || [],
+      category: item.category,
+      condition: item.condition,
+      status: item.status,
+      location: item.location,
+      authorId: item.author_id,
+      viewCount: item.view_count,
+      chatCount: item.chat_count,
+      createdAt: item.created_at,
+      bumpedAt: item.bumped_at
+    });
+  } catch (error) {
+    console.error('Update used item error:', error);
+    res.status(500).json({ message: '상품 수정에 실패했습니다.' });
+  }
+});
+
+// 중고거래 삭제
+app.delete('/api/used-items/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // 권한 확인
+    const checkResult = await pool.query('SELECT author_id FROM used_items WHERE id = $1', [id]);
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({ message: '상품을 찾을 수 없습니다.' });
+    }
+    if (checkResult.rows[0].author_id !== req.user.id) {
+      return res.status(403).json({ message: '삭제 권한이 없습니다.' });
+    }
+
+    await pool.query('DELETE FROM used_items WHERE id = $1', [id]);
+    res.json({ message: '상품이 삭제되었습니다.' });
+  } catch (error) {
+    console.error('Delete used item error:', error);
+    res.status(500).json({ message: '상품 삭제에 실패했습니다.' });
+  }
+});
+
+// 중고거래 좋아요 토글
+app.post('/api/used-items/:id/like', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const existingLike = await pool.query(
+      'SELECT id FROM used_item_likes WHERE item_id = $1 AND user_id = $2',
+      [id, req.user.id]
+    );
+
+    let liked;
+    if (existingLike.rows.length > 0) {
+      await pool.query('DELETE FROM used_item_likes WHERE item_id = $1 AND user_id = $2', [id, req.user.id]);
+      liked = false;
+    } else {
+      await pool.query('INSERT INTO used_item_likes (item_id, user_id) VALUES ($1, $2)', [id, req.user.id]);
+      liked = true;
+    }
+
+    const countResult = await pool.query('SELECT COUNT(*) FROM used_item_likes WHERE item_id = $1', [id]);
+    const likeCount = parseInt(countResult.rows[0].count);
+
+    res.json({ liked, likeCount });
+  } catch (error) {
+    console.error('Toggle used item like error:', error);
+    res.status(500).json({ message: '좋아요 처리에 실패했습니다.' });
+  }
+});
+
+// 중고거래 끌어올리기
+app.post('/api/used-items/:id/bump', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // 권한 확인
+    const checkResult = await pool.query('SELECT author_id FROM used_items WHERE id = $1', [id]);
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({ message: '상품을 찾을 수 없습니다.' });
+    }
+    if (checkResult.rows[0].author_id !== req.user.id) {
+      return res.status(403).json({ message: '끌어올리기 권한이 없습니다.' });
+    }
+
+    await pool.query('UPDATE used_items SET bumped_at = CURRENT_TIMESTAMP WHERE id = $1', [id]);
+    res.json({ message: '끌어올리기가 완료되었습니다.' });
+  } catch (error) {
+    console.error('Bump used item error:', error);
+    res.status(500).json({ message: '끌어올리기에 실패했습니다.' });
+  }
+});
+
+// 중고거래 상태 변경
+app.post('/api/used-items/:id/status', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!['available', 'reserved', 'sold'].includes(status)) {
+      return res.status(400).json({ message: '유효하지 않은 상태입니다.' });
+    }
+
+    // 권한 확인
+    const checkResult = await pool.query('SELECT author_id FROM used_items WHERE id = $1', [id]);
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({ message: '상품을 찾을 수 없습니다.' });
+    }
+    if (checkResult.rows[0].author_id !== req.user.id) {
+      return res.status(403).json({ message: '상태 변경 권한이 없습니다.' });
+    }
+
+    await pool.query('UPDATE used_items SET status = $1 WHERE id = $2', [status, id]);
+    res.json({ status });
+  } catch (error) {
+    console.error('Update used item status error:', error);
+    res.status(500).json({ message: '상태 변경에 실패했습니다.' });
+  }
+});
+
+// 내 중고거래 목록
+app.get('/api/used-items/my', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT ui.*,
+        (SELECT COUNT(*) FROM used_item_likes WHERE item_id = ui.id) as like_count
+      FROM used_items ui
+      WHERE ui.author_id = $1
+      ORDER BY ui.created_at DESC
+    `, [req.user.id]);
+
+    const items = result.rows.map(item => ({
+      id: item.id,
+      title: item.title,
+      description: item.description,
+      price: item.price,
+      isNegotiable: item.is_negotiable,
+      images: item.images || [],
+      category: item.category,
+      condition: item.condition,
+      status: item.status,
+      location: item.location,
+      authorId: item.author_id,
+      authorName: req.user.name,
+      viewCount: item.view_count,
+      chatCount: item.chat_count,
+      likeCount: parseInt(item.like_count) || 0,
+      isLiked: false,
+      createdAt: item.created_at
+    }));
+
+    res.json(items);
+  } catch (error) {
+    console.error('Get my used items error:', error);
+    res.status(500).json({ message: '내 상품 목록을 불러오는데 실패했습니다.' });
+  }
+});
+
+// 관심 상품 목록
+app.get('/api/used-items/liked', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT ui.*,
+        u.name as author_name,
+        u.profile_image as author_profile_image,
+        (SELECT COUNT(*) FROM used_item_likes WHERE item_id = ui.id) as like_count
+      FROM used_items ui
+      INNER JOIN used_item_likes uil ON ui.id = uil.item_id
+      LEFT JOIN users u ON ui.author_id = u.id
+      WHERE uil.user_id = $1
+      ORDER BY uil.created_at DESC
+    `, [req.user.id]);
+
+    const items = result.rows.map(item => ({
+      id: item.id,
+      title: item.title,
+      description: item.description,
+      price: item.price,
+      isNegotiable: item.is_negotiable,
+      images: item.images || [],
+      category: item.category,
+      condition: item.condition,
+      status: item.status,
+      location: item.location,
+      authorId: item.author_id,
+      authorName: item.author_name,
+      authorProfileImage: item.author_profile_image,
+      viewCount: item.view_count,
+      chatCount: item.chat_count,
+      likeCount: parseInt(item.like_count) || 0,
+      isLiked: true,
+      createdAt: item.created_at
+    }));
+
+    res.json(items);
+  } catch (error) {
+    console.error('Get liked used items error:', error);
+    res.status(500).json({ message: '관심 상품 목록을 불러오는데 실패했습니다.' });
   }
 });
 
