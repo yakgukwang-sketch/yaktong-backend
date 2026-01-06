@@ -603,6 +603,18 @@ async function initDB() {
       )
     `);
 
+    // Meeting boards table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS meeting_boards (
+        id SERIAL PRIMARY KEY,
+        meeting_id INTEGER REFERENCES meetings(id) ON DELETE CASCADE,
+        name VARCHAR(100) NOT NULL,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(meeting_id, name)
+      )
+    `);
+
     // Meeting posts table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS meeting_posts (
@@ -3897,6 +3909,126 @@ app.delete('/api/meetings/:meetingId/schedules/:scheduleId', authMiddleware, asy
     res.json({ message: '일정이 삭제되었습니다.' });
   } catch (error) {
     console.error('Delete meeting schedule error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// ==================== Meeting Boards API ====================
+
+// Get meeting boards
+app.get('/api/meetings/:id/boards', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(`
+      SELECT mb.*, u.name as creator_name
+      FROM meeting_boards mb
+      LEFT JOIN users u ON mb.created_by = u.id
+      WHERE mb.meeting_id = $1
+      ORDER BY mb.created_at ASC
+    `, [id]);
+
+    // Always include default boards
+    const defaultBoards = [
+      { id: -1, name: '자유 게시판', is_default: true },
+      { id: -2, name: '공지사항', is_default: true },
+      { id: -3, name: '질문/답변', is_default: true },
+    ];
+
+    const customBoards = result.rows.map(b => ({ ...b, is_default: false }));
+
+    res.json([...defaultBoards, ...customBoards]);
+  } catch (error) {
+    console.error('Get meeting boards error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// Create meeting board
+app.post('/api/meetings/:id/boards', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name } = req.body;
+
+    if (!name || name.trim() === '') {
+      return res.status(400).json({ message: '게시판 이름을 입력해주세요.' });
+    }
+
+    // Check if user is an approved member
+    const memberCheck = await pool.query(
+      'SELECT id FROM meeting_members WHERE meeting_id = $1 AND user_id = $2 AND (status = $3 OR status IS NULL)',
+      [id, req.user.id, 'approved']
+    );
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ message: '모임 멤버만 게시판을 만들 수 있습니다.' });
+    }
+
+    // Check for default board names
+    const defaultNames = ['자유 게시판', '공지사항', '질문/답변', '전체'];
+    if (defaultNames.includes(name.trim())) {
+      return res.status(400).json({ message: '기본 게시판과 같은 이름은 사용할 수 없습니다.' });
+    }
+
+    const result = await pool.query(`
+      INSERT INTO meeting_boards (meeting_id, name, created_by)
+      VALUES ($1, $2, $3)
+      RETURNING *
+    `, [id, name.trim(), req.user.id]);
+
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    if (error.code === '23505') {
+      return res.status(400).json({ message: '이미 같은 이름의 게시판이 있습니다.' });
+    }
+    console.error('Create meeting board error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// Delete meeting board
+app.delete('/api/meetings/:meetingId/boards/:boardId', authMiddleware, async (req, res) => {
+  try {
+    const { meetingId, boardId } = req.params;
+
+    // Check if user is host
+    const hostCheck = await pool.query(
+      'SELECT id FROM meeting_members WHERE meeting_id = $1 AND user_id = $2 AND is_host = true',
+      [meetingId, req.user.id]
+    );
+
+    // Or if user created the board
+    const boardCheck = await pool.query(
+      'SELECT id, name FROM meeting_boards WHERE id = $1 AND meeting_id = $2',
+      [boardId, meetingId]
+    );
+
+    if (boardCheck.rows.length === 0) {
+      return res.status(404).json({ message: '게시판을 찾을 수 없습니다.' });
+    }
+
+    const creatorCheck = await pool.query(
+      'SELECT id FROM meeting_boards WHERE id = $1 AND created_by = $2',
+      [boardId, req.user.id]
+    );
+
+    if (hostCheck.rows.length === 0 && creatorCheck.rows.length === 0) {
+      return res.status(403).json({ message: '게시판을 삭제할 권한이 없습니다.' });
+    }
+
+    const boardName = boardCheck.rows[0].name;
+
+    // Delete board
+    await pool.query('DELETE FROM meeting_boards WHERE id = $1', [boardId]);
+
+    // Move posts from deleted board to '자유 게시판'
+    await pool.query(
+      'UPDATE meeting_posts SET board_name = $1 WHERE meeting_id = $2 AND board_name = $3',
+      ['자유 게시판', meetingId, boardName]
+    );
+
+    res.json({ message: '게시판이 삭제되었습니다.' });
+  } catch (error) {
+    console.error('Delete meeting board error:', error);
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
 });
