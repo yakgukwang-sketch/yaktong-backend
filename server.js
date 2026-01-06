@@ -3722,10 +3722,10 @@ app.post('/api/meetings/:id/schedules', authMiddleware, async (req, res) => {
       return res.status(400).json({ message: '제목과 날짜는 필수입니다.' });
     }
 
-    // Check if user is a member
+    // Check if user is an approved member
     const memberCheck = await pool.query(
-      'SELECT id FROM meeting_members WHERE meeting_id = $1 AND user_id = $2',
-      [id, req.user.id]
+      'SELECT id FROM meeting_members WHERE meeting_id = $1 AND user_id = $2 AND (status = $3 OR status IS NULL)',
+      [id, req.user.id, 'approved']
     );
     if (memberCheck.rows.length === 0) {
       return res.status(403).json({ message: '모임 멤버만 일정을 만들 수 있습니다.' });
