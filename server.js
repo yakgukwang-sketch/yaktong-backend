@@ -544,6 +544,16 @@ async function initDB() {
       END $$;
     `);
 
+    // Add last_read_at column if not exists (for unread message count)
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='meeting_members' AND column_name='last_read_at') THEN
+          ALTER TABLE meeting_members ADD COLUMN last_read_at TIMESTAMP;
+        END IF;
+      END $$;
+    `);
+
     // Meeting likes table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS meeting_likes (
@@ -3653,10 +3663,10 @@ app.post('/api/meetings/:id/messages', authMiddleware, async (req, res) => {
       return res.status(400).json({ message: '메시지 내용이 필요합니다.' });
     }
 
-    // Check if user is a member of the meeting
+    // Check if user is an approved member of the meeting
     const memberCheck = await pool.query(
-      'SELECT id FROM meeting_members WHERE meeting_id = $1 AND user_id = $2',
-      [id, req.user.id]
+      'SELECT id FROM meeting_members WHERE meeting_id = $1 AND user_id = $2 AND (status = $3 OR status IS NULL)',
+      [id, req.user.id, 'approved']
     );
     if (memberCheck.rows.length === 0) {
       return res.status(403).json({ message: '모임 멤버만 채팅을 보낼 수 있습니다.' });
@@ -3684,6 +3694,62 @@ app.post('/api/meetings/:id/messages', authMiddleware, async (req, res) => {
     res.status(201).json(message);
   } catch (error) {
     console.error('Send meeting message error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// Get unread message count for a meeting
+app.get('/api/meetings/:id/unread-count', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get member record to find last_read_at
+    const memberResult = await pool.query(
+      'SELECT last_read_at FROM meeting_members WHERE meeting_id = $1 AND user_id = $2 AND (status = $3 OR status IS NULL)',
+      [id, req.user.id, 'approved']
+    );
+
+    if (memberResult.rows.length === 0) {
+      return res.json({ count: 0 });
+    }
+
+    const lastReadAt = memberResult.rows[0].last_read_at;
+
+    // Count messages after last_read_at (excluding own messages)
+    let countResult;
+    if (lastReadAt) {
+      countResult = await pool.query(
+        'SELECT COUNT(*) FROM meeting_messages WHERE meeting_id = $1 AND user_id != $2 AND created_at > $3',
+        [id, req.user.id, lastReadAt]
+      );
+    } else {
+      // If never read, count all messages from others
+      countResult = await pool.query(
+        'SELECT COUNT(*) FROM meeting_messages WHERE meeting_id = $1 AND user_id != $2',
+        [id, req.user.id]
+      );
+    }
+
+    res.json({ count: parseInt(countResult.rows[0].count) });
+  } catch (error) {
+    console.error('Get unread count error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// Mark messages as read
+app.post('/api/meetings/:id/mark-read', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    await pool.query(
+      'UPDATE meeting_members SET last_read_at = NOW() WHERE meeting_id = $1 AND user_id = $2',
+      [id, req.user.id]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Mark read error:', error);
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
   }
 });
@@ -3880,10 +3946,10 @@ app.post('/api/meetings/:id/posts', authMiddleware, async (req, res) => {
       return res.status(400).json({ message: '내용을 입력해주세요.' });
     }
 
-    // Check if user is a member
+    // Check if user is an approved member
     const memberCheck = await pool.query(
-      'SELECT id, is_host FROM meeting_members WHERE meeting_id = $1 AND user_id = $2',
-      [id, req.user.id]
+      'SELECT id, is_host FROM meeting_members WHERE meeting_id = $1 AND user_id = $2 AND (status = $3 OR status IS NULL)',
+      [id, req.user.id, 'approved']
     );
     if (memberCheck.rows.length === 0) {
       return res.status(403).json({ message: '모임 멤버만 글을 작성할 수 있습니다.' });
