@@ -683,6 +683,29 @@ async function initDB() {
       )
     `);
 
+    // Direct chats table (중고거래 1:1 채팅)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS direct_chats (
+        id SERIAL PRIMARY KEY,
+        used_item_id INTEGER REFERENCES used_items(id) ON DELETE CASCADE,
+        buyer_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        seller_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(used_item_id, buyer_id)
+      )
+    `);
+
+    // Direct messages table (1:1 채팅 메시지)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS direct_messages (
+        id SERIAL PRIMARY KEY,
+        chat_id INTEGER REFERENCES direct_chats(id) ON DELETE CASCADE,
+        sender_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        content TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     // Insert default notice if none exists
     const noticeCheck = await pool.query('SELECT COUNT(*) FROM notices');
     if (parseInt(noticeCheck.rows[0].count) === 0) {
@@ -801,6 +824,87 @@ app.post('/api/auth/login', async (req, res) => {
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 소셜 로그인
+app.post('/api/auth/social', async (req, res) => {
+  try {
+    const { provider, accessToken, email, name, profileImage } = req.body;
+
+    if (!provider || !accessToken) {
+      return res.status(400).json({ message: 'provider와 accessToken이 필요합니다.' });
+    }
+
+    // TODO: 각 provider별 토큰 검증 (프로덕션에서는 필수)
+    // 카카오: https://kapi.kakao.com/v2/user/me
+    // 네이버: https://openapi.naver.com/v1/nid/me
+    // 구글: https://oauth2.googleapis.com/tokeninfo?access_token=
+    // 애플: JWT 토큰 검증
+
+    // 이메일로 기존 사용자 확인
+    let user;
+    if (email) {
+      const existingUser = await pool.query(
+        'SELECT * FROM users WHERE email = $1',
+        [email]
+      );
+
+      if (existingUser.rows.length > 0) {
+        // 기존 사용자 로그인
+        user = existingUser.rows[0];
+
+        // 프로필 이미지 업데이트 (있는 경우)
+        if (profileImage && !user.profile_image) {
+          await pool.query(
+            'UPDATE users SET profile_image = $1 WHERE id = $2',
+            [profileImage, user.id]
+          );
+          user.profile_image = profileImage;
+        }
+      }
+    }
+
+    // 새 사용자 생성
+    if (!user) {
+      // 소셜 로그인은 랜덤 비밀번호 생성 (로그인에 사용 안함)
+      const randomPassword = Math.random().toString(36).slice(-16);
+      const hashedPassword = await bcrypt.hash(randomPassword, 10);
+
+      // 닉네임 생성 (없으면 provider + 랜덤 숫자)
+      const userName = name || `${provider}사용자${Math.floor(Math.random() * 10000)}`;
+      const userEmail = email || `${provider}_${Date.now()}@social.yaktong.app`;
+
+      const newUser = await pool.query(
+        `INSERT INTO users (email, password, name, profile_image, is_admin, social_provider)
+         VALUES ($1, $2, $3, $4, false, $5)
+         RETURNING *`,
+        [userEmail, hashedPassword, userName, profileImage, provider]
+      );
+      user = newUser.rows[0];
+    }
+
+    // JWT 토큰 생성
+    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '30d' });
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        phone: user.phone,
+        profileImage: user.profile_image,
+        isAdmin: user.is_admin,
+        userType: user.user_type || 'general',
+        reputationScore: user.reputation_score || 0,
+        licenseStatus: user.license_status || 'none',
+        createdAt: user.created_at
+      }
+    });
+  } catch (error) {
+    console.error('Social login error:', error);
+    res.status(500).json({ message: '소셜 로그인 중 오류가 발생했습니다.' });
   }
 });
 
@@ -4823,6 +4927,215 @@ app.get('/api/used-items/liked', authMiddleware, async (req, res) => {
   } catch (error) {
     console.error('Get liked used items error:', error);
     res.status(500).json({ message: '관심 상품 목록을 불러오는데 실패했습니다.' });
+  }
+});
+
+// ==================== Direct Chat (1:1 채팅) API ====================
+
+// Create or get chat for used item
+app.post('/api/used-items/:id/chat', authMiddleware, async (req, res) => {
+  try {
+    const itemId = parseInt(req.params.id);
+    const buyerId = req.user.id;
+
+    // Get item info to find seller
+    const itemResult = await pool.query('SELECT author_id FROM used_items WHERE id = $1', [itemId]);
+    if (itemResult.rows.length === 0) {
+      return res.status(404).json({ message: '상품을 찾을 수 없습니다.' });
+    }
+
+    const sellerId = itemResult.rows[0].author_id;
+
+    // Can't chat with yourself
+    if (buyerId === sellerId) {
+      return res.status(400).json({ message: '자신의 상품에는 채팅할 수 없습니다.' });
+    }
+
+    // Check if chat already exists
+    let chatResult = await pool.query(
+      'SELECT * FROM direct_chats WHERE used_item_id = $1 AND buyer_id = $2',
+      [itemId, buyerId]
+    );
+
+    if (chatResult.rows.length === 0) {
+      // Create new chat
+      chatResult = await pool.query(
+        'INSERT INTO direct_chats (used_item_id, buyer_id, seller_id) VALUES ($1, $2, $3) RETURNING *',
+        [itemId, buyerId, sellerId]
+      );
+
+      // Increment chat count on item
+      await pool.query('UPDATE used_items SET chat_count = chat_count + 1 WHERE id = $1', [itemId]);
+    }
+
+    const chat = chatResult.rows[0];
+
+    // Get item and user info
+    const itemInfo = await pool.query(`
+      SELECT ui.title, ui.price, ui.images, ui.status,
+        seller.name as seller_name, seller.profile_image as seller_image,
+        buyer.name as buyer_name, buyer.profile_image as buyer_image
+      FROM used_items ui
+      LEFT JOIN users seller ON ui.author_id = seller.id
+      LEFT JOIN users buyer ON buyer.id = $2
+      WHERE ui.id = $1
+    `, [itemId, buyerId]);
+
+    const info = itemInfo.rows[0];
+
+    res.json({
+      chatId: chat.id,
+      usedItemId: chat.used_item_id,
+      buyerId: chat.buyer_id,
+      sellerId: chat.seller_id,
+      createdAt: chat.created_at,
+      itemTitle: info.title,
+      itemPrice: info.price,
+      itemImage: info.images?.[0] || null,
+      itemStatus: info.status,
+      sellerName: info.seller_name,
+      sellerImage: info.seller_image,
+      buyerName: info.buyer_name,
+      buyerImage: info.buyer_image
+    });
+  } catch (error) {
+    console.error('Create/get chat error:', error);
+    res.status(500).json({ message: '채팅방을 생성하는데 실패했습니다.' });
+  }
+});
+
+// Get chat messages
+app.get('/api/chats/:chatId/messages', authMiddleware, async (req, res) => {
+  try {
+    const chatId = parseInt(req.params.chatId);
+    const userId = req.user.id;
+
+    // Verify user is part of this chat
+    const chatResult = await pool.query(
+      'SELECT * FROM direct_chats WHERE id = $1 AND (buyer_id = $2 OR seller_id = $2)',
+      [chatId, userId]
+    );
+
+    if (chatResult.rows.length === 0) {
+      return res.status(403).json({ message: '이 채팅에 접근할 권한이 없습니다.' });
+    }
+
+    const result = await pool.query(`
+      SELECT dm.*, u.name as sender_name, u.profile_image as sender_image
+      FROM direct_messages dm
+      LEFT JOIN users u ON dm.sender_id = u.id
+      WHERE dm.chat_id = $1
+      ORDER BY dm.created_at ASC
+    `, [chatId]);
+
+    const messages = result.rows.map(m => ({
+      id: m.id,
+      chatId: m.chat_id,
+      senderId: m.sender_id,
+      senderName: m.sender_name,
+      senderImage: m.sender_image,
+      content: m.content,
+      createdAt: m.created_at,
+      isMe: m.sender_id === userId
+    }));
+
+    res.json(messages);
+  } catch (error) {
+    console.error('Get chat messages error:', error);
+    res.status(500).json({ message: '메시지를 불러오는데 실패했습니다.' });
+  }
+});
+
+// Send chat message
+app.post('/api/chats/:chatId/messages', authMiddleware, async (req, res) => {
+  try {
+    const chatId = parseInt(req.params.chatId);
+    const userId = req.user.id;
+    const { content } = req.body;
+
+    if (!content || content.trim() === '') {
+      return res.status(400).json({ message: '메시지 내용을 입력해주세요.' });
+    }
+
+    // Verify user is part of this chat
+    const chatResult = await pool.query(
+      'SELECT * FROM direct_chats WHERE id = $1 AND (buyer_id = $2 OR seller_id = $2)',
+      [chatId, userId]
+    );
+
+    if (chatResult.rows.length === 0) {
+      return res.status(403).json({ message: '이 채팅에 접근할 권한이 없습니다.' });
+    }
+
+    const result = await pool.query(
+      'INSERT INTO direct_messages (chat_id, sender_id, content) VALUES ($1, $2, $3) RETURNING *',
+      [chatId, userId, content.trim()]
+    );
+
+    const message = result.rows[0];
+
+    res.json({
+      id: message.id,
+      chatId: message.chat_id,
+      senderId: message.sender_id,
+      senderName: req.user.name,
+      senderImage: req.user.profile_image,
+      content: message.content,
+      createdAt: message.created_at,
+      isMe: true
+    });
+  } catch (error) {
+    console.error('Send chat message error:', error);
+    res.status(500).json({ message: '메시지 전송에 실패했습니다.' });
+  }
+});
+
+// Get my chats
+app.get('/api/chats/my', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const result = await pool.query(`
+      SELECT dc.*,
+        ui.title as item_title, ui.price as item_price, ui.images as item_images, ui.status as item_status,
+        seller.name as seller_name, seller.profile_image as seller_image,
+        buyer.name as buyer_name, buyer.profile_image as buyer_image,
+        (SELECT content FROM direct_messages WHERE chat_id = dc.id ORDER BY created_at DESC LIMIT 1) as last_message,
+        (SELECT created_at FROM direct_messages WHERE chat_id = dc.id ORDER BY created_at DESC LIMIT 1) as last_message_at
+      FROM direct_chats dc
+      LEFT JOIN used_items ui ON dc.used_item_id = ui.id
+      LEFT JOIN users seller ON dc.seller_id = seller.id
+      LEFT JOIN users buyer ON dc.buyer_id = buyer.id
+      WHERE dc.buyer_id = $1 OR dc.seller_id = $1
+      ORDER BY COALESCE(
+        (SELECT created_at FROM direct_messages WHERE chat_id = dc.id ORDER BY created_at DESC LIMIT 1),
+        dc.created_at
+      ) DESC
+    `, [userId]);
+
+    const chats = result.rows.map(c => ({
+      chatId: c.id,
+      usedItemId: c.used_item_id,
+      buyerId: c.buyer_id,
+      sellerId: c.seller_id,
+      createdAt: c.created_at,
+      itemTitle: c.item_title,
+      itemPrice: c.item_price,
+      itemImage: c.item_images?.[0] || null,
+      itemStatus: c.item_status,
+      sellerName: c.seller_name,
+      sellerImage: c.seller_image,
+      buyerName: c.buyer_name,
+      buyerImage: c.buyer_image,
+      lastMessage: c.last_message,
+      lastMessageAt: c.last_message_at,
+      isMyItem: c.seller_id === userId
+    }));
+
+    res.json(chats);
+  } catch (error) {
+    console.error('Get my chats error:', error);
+    res.status(500).json({ message: '채팅 목록을 불러오는데 실패했습니다.' });
   }
 });
 
