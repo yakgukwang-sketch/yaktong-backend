@@ -2059,6 +2059,111 @@ app.post('/api/feedback/ai', authMiddleware, async (req, res) => {
   }
 });
 
+// 관리자: AI 피드백 목록 조회
+app.get('/api/admin/ai-feedback', authMiddleware, async (req, res) => {
+  try {
+    if (!req.user.is_admin) {
+      return res.status(403).json({ message: '권한이 없습니다.' });
+    }
+
+    const { rating } = req.query; // 필터: 1(좋아요), -1(싫어요), 없으면 전체
+
+    let query = `
+      SELECT f.*, u.name as user_name, u.nickname as user_nickname
+      FROM ai_feedback f
+      LEFT JOIN users u ON f.user_id = u.id
+    `;
+    const params = [];
+
+    if (rating) {
+      query += ' WHERE f.rating = $1';
+      params.push(parseInt(rating));
+    }
+
+    query += ' ORDER BY f.created_at DESC LIMIT 100';
+
+    const result = await pool.query(query, params);
+
+    res.json(result.rows.map(r => ({
+      id: r.id,
+      userId: r.user_id,
+      userName: r.user_name,
+      userNickname: r.user_nickname,
+      aiResponse: r.ai_response,
+      rating: r.rating,
+      comment: r.comment,
+      createdAt: r.created_at
+    })));
+  } catch (error) {
+    console.error('Admin AI Feedback error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// ==================== Customer Feedback API ====================
+
+app.post('/api/feedback/customer', authMiddleware, async (req, res) => {
+  try {
+    const { category, content } = req.body;
+    const userId = req.user.id;
+
+    if (!content || content.trim().length === 0) {
+      return res.status(400).json({ message: '내용을 입력해주세요.' });
+    }
+
+    // customer_feedback 테이블에 저장 (테이블 없으면 자동 생성)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS customer_feedback (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id),
+        category VARCHAR(50),
+        content TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    await pool.query(
+      'INSERT INTO customer_feedback (user_id, category, content) VALUES ($1, $2, $3)',
+      [userId, category || '일반', content]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Customer Feedback error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 관리자: 고객 의견 목록 조회
+app.get('/api/admin/customer-feedback', authMiddleware, async (req, res) => {
+  try {
+    if (!req.user.is_admin) {
+      return res.status(403).json({ message: '권한이 없습니다.' });
+    }
+
+    const result = await pool.query(`
+      SELECT f.*, u.name as user_name, u.nickname as user_nickname
+      FROM customer_feedback f
+      LEFT JOIN users u ON f.user_id = u.id
+      ORDER BY f.created_at DESC
+      LIMIT 100
+    `);
+
+    res.json(result.rows.map(r => ({
+      id: r.id,
+      userId: r.user_id,
+      userName: r.user_name,
+      userNickname: r.user_nickname,
+      category: r.category,
+      content: r.content,
+      createdAt: r.created_at
+    })));
+  } catch (error) {
+    console.error('Admin Customer Feedback error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
 // ==================== Notice API ====================
 
 app.get('/api/notices', authMiddleware, async (req, res) => {
