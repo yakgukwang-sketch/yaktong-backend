@@ -2024,6 +2024,41 @@ app.post('/api/ai/chat', authMiddleware, async (req, res) => {
   }
 });
 
+// ==================== AI Feedback API ====================
+
+app.post('/api/feedback/ai', authMiddleware, async (req, res) => {
+  try {
+    const { aiResponse, rating, comment } = req.body;
+    const userId = req.user.id;
+
+    if (!aiResponse || rating === undefined) {
+      return res.status(400).json({ message: 'aiResponse와 rating은 필수입니다.' });
+    }
+
+    // ai_feedback 테이블에 저장 (테이블 없으면 자동 생성)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS ai_feedback (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id),
+        ai_response TEXT NOT NULL,
+        rating INTEGER NOT NULL,
+        comment TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    await pool.query(
+      'INSERT INTO ai_feedback (user_id, ai_response, rating, comment) VALUES ($1, $2, $3, $4)',
+      [userId, aiResponse, rating, comment]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('AI Feedback error:', error);
+    res.status(500).json({ message: '서버 오류가 발생했습니다.' });
+  }
+});
+
 // ==================== Notice API ====================
 
 app.get('/api/notices', authMiddleware, async (req, res) => {
